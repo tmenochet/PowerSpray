@@ -481,7 +481,9 @@ function Local:New-KerberosSpray {
                 $cipher = $temp.Sub[0].GetOctetString()
                 $repHash = [BitConverter]::ToString($cipher).Replace("-", $null)
                 $asrepHash = $repHash.Insert(32, '$')
-                Write-Output "`$krb5asrep`$23`$$($cred.Username)@$($Domain):$($asrepHash)"
+                $temp = $encPart.Sub[0].Sub | Where-Object {$_.TagValue -eq 0}
+                $eType = $temp.Sub[0].GetInteger()
+                Write-Output "`$krb5asrep`$$($eType)`$$($cred.Username)@$($Domain):$($asrepHash)"
             }
             else {
                 if ($BloodHound) {
