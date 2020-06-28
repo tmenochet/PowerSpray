@@ -31,10 +31,11 @@ PS C:\> Invoke-PowerSpray -UserFile .\users.lst -Server 192.168.1.10 -Threads 5
 ## AS-REP roasting
 
 If preauthentication is not enabled for a given user, the server returns an AS-REP response including encrypted material that can be cracked offline to reveal the target user's password.
+The encryption type may be downgraded to ARCFOUR-HMAC-MD5 (ETYPE 23) which is significantly quicker to crack than the default AES256-CTS-HMAC-SHA1-96 (ETYPE 18) encryption.
 From an authenticated perspective, users vulnerable to this attack known as "AS-REP roasting" can be retrieved via LDAP based on their attribute "userAccountControl":
 
 ```
-PS C:\> Invoke-PowerSpray -Ldap -Domain ADATUM.CORP
+PS C:\> Invoke-PowerSpray -Ldap -Domain ADATUM.CORP -EncType 23
 ```
 
 By default, the LDAP connection is established within the current user authenticated context but alternative credentials can be specified using `-LdapUser` and `-LdapPass` parameters.

