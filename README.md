@@ -53,7 +53,7 @@ A password spraying attack attempts to login across all of the enabled domain us
 PS C:\> Invoke-PowerSpray -Ldap -Server DC.ADATUM.CORP -Password 'Welcome2020'
 ```
 
-As an alternative, the `-UserAsPassword` switch can be used to specifies the username as password for each authentication attempt.
+As an alternative, the `-UserAsPassword` switch can be used to specify the username as password for each authentication attempt.
 
 To prevent account lockout, the attribute "badPwdCount" is retrieved via LDAP for each domain account and compared to the threshold defined in domain's default password policy. A custom threshold can also be specified with the `-LockoutThreshold` parameter.
 This LDAP attribute can also be useful to check after an unsuccessful authentication because an unchanged value means that the provided password is a previous one of the given user, revealing a potential password pattern.
