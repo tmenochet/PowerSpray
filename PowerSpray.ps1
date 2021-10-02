@@ -419,7 +419,7 @@ Function Local:New-KerberosSpray {
     }
 
     if ($CheckOldPwd) {
-        $currentUser = ((Get-LdapCurrentUser -Server $Server).Split('\\'))[1]
+        $currentUser = ((Get-LdapCurrentUser -Server $Server -Credential $LdapCredential).Split('\\'))[1]
     }
 
     foreach ($cred in $Collection) {
@@ -998,18 +998,20 @@ Function Local:Get-LdapCurrentUser {
     [CmdletBinding()]
     Param (
         [String]
-        $Server = $Env:USERDNSDOMAIN
+        $Server = $Env:USERDNSDOMAIN,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
     )
 
     try {
         [Reflection.Assembly]::LoadWithPartialName("System.DirectoryServices.Protocols") | Out-Null
 
-        if ($Server) {
-            $conn = New-Object DirectoryServices.Protocols.LdapConnection $Server
-        }
-        else {
-            $ident = New-Object DirectoryServices.Protocols.LdapDirectoryIdentifier -ArgumentList @($null)
-            $conn = New-Object DirectoryServices.Protocols.LdapConnection $ident
+        $conn = New-Object DirectoryServices.Protocols.LdapConnection $Server
+        if ($Credential.UserName) {
+            $conn.Credential = $Credential
         }
 
         # LDAP_SERVER_WHO_AM_I_OID = 1.3.6.1.4.1.4203.1.11.3
