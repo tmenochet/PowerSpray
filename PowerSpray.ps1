@@ -175,7 +175,7 @@ Function Invoke-PowerSpray {
         [Net.IPAddress]::Parse($Server) | Out-Null
     }
     catch {
-        $Server = (Resolve-DnsName -Name $Server -Verbose:$false).IPAddress | Select-Object -First 1
+        $Server = (Resolve-DnsName -Name $Server -Type A -Verbose:$false).IPAddress | Select-Object -First 1
     }
 
     if ($CheckOldPwd) {
