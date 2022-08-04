@@ -19,7 +19,7 @@ Function Invoke-PowerSpray {
     Specifies a file containing a list of usernames to send the AS-REQ for.
 
 .PARAMETER EmptyPassword
-    Specifies empty password for each authentication attempt. When `-Ldap` switch is enabled, user list is filtered based on the UF_DONT_EXPIRE_PASSWD flag.
+    Specifies empty password for each authentication attempt. When `-Ldap` switch is enabled, user list is filtered based on the UF_PASSWD_NOTREQD flag.
 
 .PARAMETER UserAsPassword
     Specifies username as password for each authentication attempt (default case, lowercase or uppercase).
