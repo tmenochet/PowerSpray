@@ -6,7 +6,7 @@ The TGT provided to the user is then presented to the KDC as proof of identity e
 
 PowerSpray leverages Kerberos preauthentication in order to:
   - Identify valid usernames from an unauthenticated perspective (enumeration)
-  - Retrieve encrypted material for users that do not have preauthentication required (AS-REP roasting)
+  - Retrieve encrypted material for users that do not have preauthentication required (roasting)
   - Validate plain-text passwords against domain users (spraying)
   - Validate NTLM password hashes dumped from a compromised domain against another target domain in order to identify credential reuse (stuffing)
 
@@ -28,17 +28,23 @@ PS C:\> Invoke-PowerSpray -UserFile .\users.lst -Server 192.168.1.10 -Threads 5
 ```
 
 
-## AS-REP roasting
+## Roasting
 
-If preauthentication is not enabled for a given user, the server returns an AS-REP response including encrypted material that can be cracked offline to reveal the target user's password.
+If preauthentication is not required for a given user, the server returns an AS-REP response including encrypted material that can be cracked offline to reveal the user password.
 The encryption type may be downgraded to ARCFOUR-HMAC-MD5 (ETYPE 23) which is significantly quicker to crack than the default AES256-CTS-HMAC-SHA1-96 (ETYPE 18) encryption.
-From an authenticated perspective, users vulnerable to this attack known as "AS-REP roasting" can be retrieved via LDAP based on their attribute "userAccountControl":
+From an authenticated perspective, users vulnerable to this attack known as **AS-REP roast** can be retrieved via LDAP based on their attribute "userAccountControl":
 
 ```
 PS C:\> Invoke-PowerSpray -Ldap -Server DC.ADATUM.CORP -EncType RC4
 ```
 
 By default, the LDAP connection is established within the current user authenticated context but alternative credentials can be specified using `-LdapCredential` parameters.
+
+From an unauthenticated perspective, it is also possible to perform a **Kerberoast** attack targeting any service account (with SPN attribute) via a given user configured to not require pre-authentication. The encrypted material returned in the AS-REP can be cracked offline to reveal the service password:
+
+```
+PS C:\> Invoke-PowerSpray -Server DC.ADATUM.CORP -UserName userWithNoPreauth -ServiceList .\services.lst -EncType RC4
+```
 
 
 ## Spraying
@@ -85,5 +91,6 @@ Credential reuse between domains may provide a way to domain compromising when n
 ## Credits
 
 * https://www.harmj0y.net/blog/activedirectory/roasting-as-reps
+* https://www.semperis.com/blog/new-attack-paths-as-requested-sts/
 * https://www.harmj0y.net/blog/redteaming/from-kekeo-to-rubeus
 * https://blog.fox-it.com/2017/11/28/further-abusing-the-badpwdcount-attribute
